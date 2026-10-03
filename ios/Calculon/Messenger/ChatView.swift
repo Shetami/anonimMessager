@@ -49,8 +49,8 @@ struct ChatView: View {
         .task(id: contactID) {
             // Refresh while the chat is open; also expires disappearing messages.
             while !Task.isCancelled {
+                await service.markRead(contactID)
                 messages = service.messages(with: contactID)
-                service.markRead(contactID)
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -126,8 +126,17 @@ struct Bubble: View {
         switch message.status {
         case .sending: Image(systemName: "clock")
         case .sent: Image(systemName: "checkmark")
+        case .delivered: doubleCheck
+        case .read: doubleCheck.foregroundStyle(.blue)
         case .failed: Image(systemName: "exclamationmark.circle").foregroundStyle(.red)
         case .received: EmptyView()
+        }
+    }
+
+    private var doubleCheck: some View {
+        ZStack(alignment: .leading) {
+            Image(systemName: "checkmark")
+            Image(systemName: "checkmark").padding(.leading, 5)
         }
     }
 }

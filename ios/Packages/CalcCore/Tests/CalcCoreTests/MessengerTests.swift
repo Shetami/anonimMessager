@@ -103,6 +103,30 @@ struct MessengerTests {
         #expect(alice.messages(with: bob.accountID!).map(\.body) == ["hi bob", "hi alice"])
     }
 
+    @Test func receipts() async throws {
+        let relay = FakeRelay()
+        let alice = try makeService(relay)
+        let bob = try makeService(relay)
+        try await alice.register()
+        try await bob.register()
+        try await alice.addContact(id: bob.accountID!, name: "Bob", verifiedInPerson: false)
+        try await alice.send("hi bob", to: bob.accountID!)
+        #expect(alice.messages(with: bob.accountID!).map(\.status) == [.sent])
+
+        await bob.sync()
+        #expect(await alice.sync() == 0) // receipts aren't counted as messages
+        #expect(alice.messages(with: bob.accountID!).map(\.status) == [.delivered])
+
+        await bob.markRead(alice.accountID!)
+        #expect(bob.messages(with: alice.accountID!).map(\.status) == [.read])
+        await alice.sync()
+        #expect(alice.messages(with: bob.accountID!).map(\.status) == [.read])
+
+        // Already reported: no second receipt.
+        await bob.markRead(alice.accountID!)
+        #expect(relay.queues[alice.accountID!, default: []].isEmpty)
+    }
+
     @Test func rejectsSubstitutedKeys() async throws {
         let relay = FakeRelay()
         let alice = try makeService(relay)

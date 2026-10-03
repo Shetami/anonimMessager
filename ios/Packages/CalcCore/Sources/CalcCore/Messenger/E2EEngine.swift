@@ -67,7 +67,9 @@ public struct Contact: Codable, Identifiable, Hashable, Sendable {
 }
 
 public struct ChatMessage: Codable, Identifiable, Hashable, Sendable {
-    public enum Status: String, Codable, Sendable { case sending, sent, failed, received }
+    /// Outgoing: sending → sent (accepted by the relay) → delivered → read.
+    /// Incoming: received, then read once the read receipt went out.
+    public enum Status: String, Codable, Sendable { case sending, sent, failed, received, delivered, read }
 
     public var id: String
     public var contactID: String
@@ -81,11 +83,13 @@ public struct ChatMessage: Codable, Identifiable, Hashable, Sendable {
 /// Plaintext inside the Signal message. Timestamps and everything else about
 /// the message are only ever visible end-to-end.
 public struct MessagePayload: Codable, Sendable {
-    public enum Kind: String, Codable, Sendable { case text, timer }
+    public enum Kind: String, Codable, Sendable { case text, timer, delivered, read }
 
     public var kind: Kind
     public var id: String
     public var body: String
     public var sentAt: Date
     public var disappearAfter: TimeInterval?
+    /// Message IDs a delivered/read receipt refers to.
+    public var ids: [String]? = nil
 }

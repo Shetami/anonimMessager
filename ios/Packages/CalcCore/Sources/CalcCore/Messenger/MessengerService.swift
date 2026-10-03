@@ -166,10 +166,26 @@ public final class MessengerService {
         reloadContacts()
     }
 
-    public func markRead(_ id: String) {
-        guard var c = contact(id), c.unread > 0 else { return }
-        c.unread = 0
-        try? saveContact(c)
+    /// Clears the unread badge and sends a read receipt for every incoming
+    /// message not reported yet. Messages stay `.received` if the receipt
+    /// can't be sent, so the next call retries.
+    public func markRead(_ id: String) async {
+        guard var c = contact(id) else { return }
+        if c.unread > 0 {
+            c.unread = 0
+            try? saveContact(c)
+        }
+        let pending = messages(with: id).filter { !$0.outgoing && $0.status == .received }
+        guard !pending.isEmpty else { return }
+        do {
+            try await sendReceipt(.read, ids: pending.map(\.id), to: c)
+        } catch {
+            return
+        }
+        for var m in pending {
+            m.status = .read
+            try? saveMessage(m, preview: nil)
+        }
     }
 
     // MARK: - Messages
@@ -190,6 +206,11 @@ public final class MessengerService {
         try saveMessage(msg, preview: text)
         do {
             try await deliver(MessagePayload(kind: .text, id: msg.id, body: text, sentAt: now, disappearAfter: c.disappearAfter), to: c)
+            // A receipt may already have upgraded it while we were awaiting.
+            if let stored = try? db.get(ChatMessage.self, collection: C.messages, key: msg.id),
+               stored.status != .sending {
+                return stored
+            }
             msg.status = .sent
         } catch {
             msg.status = .failed
@@ -208,6 +229,11 @@ public final class MessengerService {
         try await deliver(MessagePayload(kind: .timer, id: UUID().uuidString, body: "", sentAt: Date(), disappearAfter: seconds), to: c)
     }
 
+    private func sendReceipt(_ kind: MessagePayload.Kind, ids: [String], to c: Contact) async throws {
+        try await deliver(MessagePayload(kind: kind, id: UUID().uuidString, body: "", sentAt: Date(),
+                                         disappearAfter: c.disappearAfter, ids: ids), to: c)
+    }
+
     private func deliver(_ payload: MessagePayload, to c: Contact) async throws {
         guard let me = state?.accountID else { throw MessengerError.notRegistered }
         let (kind, ciphertext) = try engine.encrypt(try JSONEncoder().encode(payload), for: c.id)
@@ -222,15 +248,24 @@ public final class MessengerService {
     public func sync() async -> Int {
         guard let auth, let sealing, state?.registered == true else { return 0 }
         var received = 0
+        var delivered: [String: [String]] = [:] // contact ID → message IDs
         do {
             while true {
                 let batch = try await relay.fetch(auth: auth)
                 if batch.isEmpty { break }
                 for env in batch {
-                    if (try? await handle(env.data, sealing: sealing)) == true { received += 1 }
+                    if let msg = try? await handle(env.data, sealing: sealing) {
+                        received += 1
+                        delivered[msg.contactID, default: []].append(msg.id)
+                    }
                 }
                 try await relay.ack(batch.map(\.id), auth: auth)
                 if batch.count < 100 { break }
+            }
+            // Best effort: a lost delivery receipt only means one checkmark
+            // until the read receipt arrives.
+            for (contactID, ids) in delivered {
+                if let c = contact(contactID) { try? await sendReceipt(.delivered, ids: ids, to: c) }
             }
             try await maintainKeys()
             purgeExpired()
@@ -241,13 +276,19 @@ public final class MessengerService {
         return received
     }
 
-    private func handle(_ data: Data, sealing: Curve25519.KeyAgreement.PrivateKey) async throws -> Bool {
+    /// Returns the stored message for an incoming text, nil for anything else.
+    private func handle(_ data: Data, sealing: Curve25519.KeyAgreement.PrivateKey) async throws -> ChatMessage? {
         let content = try SealedEnvelope.open(data, with: sealing)
-        guard AccountID.isValid(content.sender), content.sender != state?.accountID else { return false }
+        guard AccountID.isValid(content.sender), content.sender != state?.accountID else { return nil }
         // The engine only trusts identity keys that hash to content.sender, so
         // a forged sender ID fails here.
         let plaintext = try engine.decrypt(content.ciphertext, kind: content.kind, from: content.sender)
         let payload = try JSONDecoder().decode(MessagePayload.self, from: plaintext)
+
+        if payload.kind == .delivered || payload.kind == .read {
+            applyReceipt(payload, from: content.sender)
+            return nil
+        }
 
         var c: Contact
         if let existing = contact(content.sender) {
@@ -268,7 +309,9 @@ public final class MessengerService {
         case .timer:
             c.disappearAfter = payload.disappearAfter
             try saveContact(c)
-            return false
+            return nil
+        case .delivered, .read:
+            return nil
         case .text:
             if c.disappearAfter != payload.disappearAfter { c.disappearAfter = payload.disappearAfter }
             c.unread += 1
@@ -279,7 +322,21 @@ public final class MessengerService {
                 sentAt: min(payload.sentAt, now), status: .received,
                 expiresAt: payload.disappearAfter.map { now.addingTimeInterval($0) })
             try saveMessage(msg, preview: payload.body)
-            return true
+            return msg
+        }
+    }
+
+    /// Upgrades our outgoing messages to delivered/read. Only messages we sent
+    /// to this very sender are touched, and status never moves backwards.
+    private func applyReceipt(_ payload: MessagePayload, from sender: String) {
+        let newStatus: ChatMessage.Status = payload.kind == .read ? .read : .delivered
+        for id in payload.ids ?? [] {
+            guard var m = try? db.get(ChatMessage.self, collection: C.messages, key: id),
+                  m.outgoing, m.contactID == sender, m.status != .read,
+                  !(m.status == .delivered && newStatus == .delivered)
+            else { continue }
+            m.status = newStatus
+            try? saveMessage(m, preview: nil)
         }
     }
 
