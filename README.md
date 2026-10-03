@@ -6,6 +6,7 @@ iOS-мессенджер со сквозным шифрованием, зама�
 - **Ложный код.** Второй код открывает отдельный, полностью независимый профиль. На устройстве нельзя доказать, что существует ещё один профиль.
 - **Шифрование.** Signal Protocol (libsignal: PQXDH + Double Ratchet, постквантовая защита) поверх «запечатанного конверта», который скрывает отправителя от сервера.
 - **Анонимность.** Нет телефона, email и аккаунтов. ID — это хэш ключа шифрования, так что сервер не может незаметно подменить ключ.
+- **Звонки.** Голосовые и видеозвонки один на один через RingRTC (библиотека звонков Signal). Сигнализация идёт тем же E2E-каналом, медиа шифруется SRTP с ключами, привязанными к identity-ключам. Медиа всегда идёт через TURN-relay, поэтому собеседники не видят IP-адресов друг друга. Позвонить могут только принятые контакты.
 - **Сервер** — «слепой» relay на Go. Он хранит только зашифрованные конверты одинакового размера, не знает отправителей и не пишет логи.
 
 Подробная модель угроз и ограничения описаны в [docs/SECURITY.md](docs/SECURITY.md). **Прочитайте этот документ, прежде чем доверять приложению.**
@@ -19,6 +20,7 @@ ios/
   Calculon/                 SwiftUI-приложение + адаптер libsignal
   project.yml, Podfile      XcodeGen + CocoaPods
   .libsignal-version        закреплённая версия libsignal и checksum
+  .ringrtc-version          закреплённая версия RingRTC (звонки) и checksum
 docs/SECURITY.md            модель угроз
 ```
 
@@ -32,7 +34,7 @@ go test ./...
 go run ./cmd/relay -addr :8443 -db relay.db -tls-cert cert.pem -tls-key key.pem
 ```
 
-Развёртывание описано в [server/README.md](server/README.md).
+Развёртывание описано в [server/README.md](server/README.md). Для звонков нужен ещё TURN-сервер (coturn), см. раздел «Звонки» там же.
 
 ### iOS
 
@@ -41,7 +43,7 @@ go run ./cmd/relay -addr :8443 -db relay.db -tls-cert cert.pem -tls-key key.pem
 3. Выполните:
    ```sh
    cd ios
-   ./bootstrap.sh            # xcodegen + pod install (libsignal v0.103.1)
+   ./bootstrap.sh            # xcodegen + pod install (libsignal v0.103.1, RingRTC v2.72.0)
    open Calculon.xcworkspace
    ```
 4. Укажите свою команду подписи и bundle id в `project.yml` и соберите проект.

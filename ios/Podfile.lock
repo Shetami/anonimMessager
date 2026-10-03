@@ -1,22 +1,33 @@
 PODS:
   - LibSignalClient (0.103.1)
+  - SignalRingRTC (2.72.0):
+    - SignalRingRTC/WebRTC (= 2.72.0)
+  - SignalRingRTC/WebRTC (2.72.0)
 
 DEPENDENCIES:
   - LibSignalClient (from `https://github.com/signalapp/libsignal.git`, tag `v0.103.1`)
+  - SignalRingRTC (from `https://github.com/signalapp/ringrtc.git`, tag `v2.72.0`)
 
 EXTERNAL SOURCES:
   LibSignalClient:
     :git: https://github.com/signalapp/libsignal.git
     :tag: v0.103.1
+  SignalRingRTC:
+    :git: https://github.com/signalapp/ringrtc.git
+    :tag: v2.72.0
 
 CHECKOUT OPTIONS:
   LibSignalClient:
     :git: https://github.com/signalapp/libsignal.git
     :tag: v0.103.1
+  SignalRingRTC:
+    :git: https://github.com/signalapp/ringrtc.git
+    :tag: v2.72.0
 
 SPEC CHECKSUMS:
   LibSignalClient: cb17aaf709fcb03d6e347d8401a333dbcfd8f688
+  SignalRingRTC: 1dc50379c72c1371ed7e0a43369a395da2eb89f8
 
-PODFILE CHECKSUM: 16f30a3e06a2f2004aaef63ec78493ef87c8115f
+PODFILE CHECKSUM: 34a3bcb2835b294d210e698137494c039bc18e3d
 
 COCOAPODS: 1.17.0

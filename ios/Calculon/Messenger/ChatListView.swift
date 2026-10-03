@@ -4,13 +4,20 @@ import SwiftUI
 struct MessengerRootView: View {
     @Environment(Session.self) private var session
     @Environment(MessengerService.self) private var service
+    @Environment(CallService.self) private var calls
 
     var body: some View {
-        NavigationStack {
-            ChatListView()
-                .navigationDestination(for: String.self) { ChatView(contactID: $0) }
+        ZStack {
+            NavigationStack {
+                ChatListView()
+                    .navigationDestination(for: String.self) { ChatView(contactID: $0) }
+            }
+            .tint(.orange)
+            if let call = calls.current, call.isVisible {
+                CallScreen(call: call).transition(.opacity)
+            }
         }
-        .tint(.orange)
+        .animation(.default, value: calls.current?.isVisible)
     }
 }
 

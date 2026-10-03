@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,6 +30,9 @@ func main() {
 	attachDir := flag.String("attachments", "attachments", "directory for encrypted attachments")
 	maxAttachment := flag.Int64("max-attachment", 110<<20, "max size of one encrypted attachment in bytes")
 	attachQuota := flag.Int64("attachments-quota", 20<<30, "max total size of stored attachments in bytes")
+	turnSecretFile := flag.String("turn-secret-file", "", "file with the static-auth-secret shared with coturn (enables calls)")
+	turnURLs := flag.String("turn-urls", "", "comma-separated TURN URLs handed to clients, e.g. turn:turn.example.com:3478?transport=udp,turns:turn.example.com:443?transport=tcp")
+	turnTTL := flag.Duration("turn-ttl", 12*time.Hour, "lifetime of issued TURN credentials (longest possible call)")
 	debugAuth := flag.Bool("debug-auth", false, "log why authentication fails (for development)")
 	flag.Parse()
 
@@ -45,6 +49,22 @@ func main() {
 
 	a := api.New(st, bl)
 	a.DebugAuth = *debugAuth
+	if *turnSecretFile != "" {
+		secret, err := os.ReadFile(*turnSecretFile)
+		if err != nil {
+			log.Fatalf("read turn secret: %v", err)
+		}
+		var urls []string
+		for _, u := range strings.Split(*turnURLs, ",") {
+			if u = strings.TrimSpace(u); u != "" {
+				urls = append(urls, u)
+			}
+		}
+		if len(urls) == 0 {
+			log.Fatalf("-turn-secret-file requires -turn-urls")
+		}
+		a.TURN = &api.TURNConfig{Secret: []byte(strings.TrimSpace(string(secret))), URLs: urls, TTL: *turnTTL}
+	}
 	handler := a.Handler()
 
 	srv := &http.Server{

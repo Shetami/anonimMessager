@@ -16,3 +16,6 @@ server/relay
 *.db
 server/relay.log
 server/attachments/
+
+# Local TURN for development (secret included)
+server/dev/

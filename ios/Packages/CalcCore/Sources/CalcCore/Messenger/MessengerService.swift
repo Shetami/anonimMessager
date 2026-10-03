@@ -21,6 +21,8 @@ public final class MessengerService {
     public private(set) var state: ProfileState?
     public private(set) var contacts: [Contact] = []
     public private(set) var lastSyncError: Error?
+    /// Envelopes (of any kind) the last sync fetched.
+    @ObservationIgnored public private(set) var lastFetched = 0
     /// Attachment IDs being downloaded right now / whose last download failed.
     public private(set) var downloading: Set<String> = []
     public private(set) var failedDownloads: Set<String> = []
@@ -34,11 +36,22 @@ public final class MessengerService {
     @ObservationIgnored private let relay: RelayTransport
     @ObservationIgnored private var auth: RelayAuth?
     @ObservationIgnored private var sealing: Curve25519.KeyAgreement.PrivateKey?
+    @ObservationIgnored private var lastMaintenance: Date?
+    @ObservationIgnored private var turn: (credentials: TurnCredentials, expires: Date)?
+
+    /// Call signaling from accepted contacts, in the order it was sent.
+    /// Message requests and strangers can't ring this device. `age` is how
+    /// long ago the peer sent it (by their clock).
+    @ObservationIgnored public var onCallSignal: ((_ contactID: String, _ signal: CallSignal, _ age: TimeInterval) -> Void)?
 
     static let preKeyBatch = 100
     static let kyberBatch = 20
     static let replenishBelow = 20
     static let signedPreKeyLifetime: TimeInterval = 7 * 24 * 3600
+    static let maintenanceInterval: TimeInterval = 60
+    /// Cached TURN credentials are replaced once less than this is left, which
+    /// is also the longest call they're guaranteed to last.
+    static let turnMinRemaining: TimeInterval = 2 * 3600
     public static let maxAttachments = 10
     public static let maxAttachmentSize = 100 << 20
     nonisolated static let maxThumbnailSize = 32 << 10
@@ -353,15 +366,20 @@ public final class MessengerService {
 
     /// Fetches, decrypts and stores pending envelopes, then acknowledges them.
     /// Undecryptable envelopes are dropped (acked) rather than retried forever.
+    /// With `wait` > 0 the first fetch long-polls for up to that many seconds.
     @discardableResult
-    public func sync() async -> Int {
+    public func sync(wait: Int = 0) async -> Int {
         guard let auth, let sealing, state?.registered == true else { return 0 }
         var received = 0
         var delivered: [String: [String]] = [:] // contact ID → message IDs
         var toDownload: [AttachmentPointer] = []
+        lastFetched = 0
         do {
+            var first = true
             while true {
-                let batch = try await relay.fetch(auth: auth)
+                let batch = try await relay.fetch(auth: auth, wait: first ? wait : 0)
+                first = false
+                lastFetched += batch.count
                 if batch.isEmpty { break }
                 for env in batch {
                     if let msg = try? await handle(env.data, sealing: sealing) {
@@ -382,7 +400,12 @@ public final class MessengerService {
                 // One at a time keeps memory bounded for large files.
                 Task { for p in toDownload { await self.download(p) } }
             }
-            try await maintainKeys()
+            if lastMaintenance.map({ Date().timeIntervalSince($0) > Self.maintenanceInterval }) ?? true {
+                try await maintainKeys()
+                // Fetched ahead of time so the request doesn't reveal a call.
+                _ = try? await turnCredentials()
+                lastMaintenance = Date()
+            }
             purgeExpired()
             lastSyncError = nil
         } catch {
@@ -402,6 +425,12 @@ public final class MessengerService {
 
         if payload.kind == .delivered || payload.kind == .read {
             applyReceipt(payload, from: content.sender)
+            return nil
+        }
+        if payload.kind == .call {
+            if let signal = payload.call, let c = contact(content.sender), !c.isRequest {
+                onCallSignal?(c.id, signal, max(0, Date().timeIntervalSince(payload.sentAt)))
+            }
             return nil
         }
 
@@ -425,7 +454,7 @@ public final class MessengerService {
             c.disappearAfter = payload.disappearAfter
             try saveContact(c)
             return nil
-        case .delivered, .read:
+        case .delivered, .read, .call:
             return nil
         case .text:
             // Message IDs are chosen by the sender: never let one replace a
@@ -495,6 +524,40 @@ public final class MessengerService {
                 deleteFiles(of: m)
                 try? db.delete(collection: C.messages, key: m.id)
             }
+        }
+    }
+
+    // MARK: - Calls
+
+    public func sendCallSignal(_ signal: CallSignal, to contactID: String) async throws {
+        guard let c = contact(contactID) else { throw MessengerError.unknownContact }
+        try await deliver(MessagePayload(kind: .call, id: UUID().uuidString, body: "", sentAt: Date(),
+                                         disappearAfter: c.disappearAfter, call: signal), to: c)
+    }
+
+    /// Serialized public identity key of this profile.
+    public func localIdentityKey() throws -> Data { try engine.identityKey() }
+
+    /// Cached, so fetching them doesn't coincide with (and reveal) a call.
+    public func turnCredentials() async throws -> TurnCredentials {
+        if let turn, turn.expires.timeIntervalSinceNow > Self.turnMinRemaining { return turn.credentials }
+        let fresh = try await relay.turnCredentials()
+        turn = (fresh, Date().addingTimeInterval(TimeInterval(fresh.ttl)))
+        return fresh
+    }
+
+    /// Adds a finished call to the chat. A missed call counts as unread.
+    public func recordCall(with contactID: String, outgoing: Bool, info: CallInfo, at date: Date = Date()) {
+        guard let c = contact(contactID) else { return }
+        let msg = ChatMessage(
+            id: UUID().uuidString, contactID: contactID, outgoing: outgoing, body: "", sentAt: date,
+            // Never .received: that would send a read receipt for it.
+            status: outgoing ? .sent : .read,
+            expiresAt: c.disappearAfter.map { Date().addingTimeInterval($0) }, call: info)
+        try? saveMessage(msg, preview: "📞 " + info.label(outgoing: outgoing))
+        if !outgoing, info.outcome == .missed, var c = contact(contactID) {
+            c.unread += 1
+            try? saveContact(c)
         }
     }
 

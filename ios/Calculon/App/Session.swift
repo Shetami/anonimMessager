@@ -9,6 +9,7 @@ import Observation
 final class Session {
     let profile: UnlockedProfile
     let service: MessengerService
+    let calls: CallService
     @ObservationIgnored let vault: Vault
     @ObservationIgnored private let onLock: () -> Void
     @ObservationIgnored private let onWipe: () -> Void
@@ -29,6 +30,7 @@ final class Session {
         self.onWipe = onWipe
         let engine = try SignalEngine(db: db)
         self.service = MessengerService(db: db, engine: engine, relay: RelayClient(config: AppConfig.relay))
+        self.calls = CallService(service: service)
         self.autoLockSeconds = (try? db.get(TimeInterval.self, collection: "meta", key: "autolock")) ?? 0
     }
 
@@ -47,8 +49,13 @@ final class Session {
                 }
             }
             while !Task.isCancelled {
-                await self.service.sync()
-                try? await Task.sleep(for: AppConfig.pollInterval)
+                let started = Date()
+                await self.service.sync(wait: AppConfig.longPollSeconds)
+                // A relay without long polling, or an error, returns at once
+                // with nothing: back off instead of spinning.
+                if self.service.lastFetched == 0, Date().timeIntervalSince(started) < 1 {
+                    try? await Task.sleep(for: AppConfig.pollInterval)
+                }
             }
         }
     }
@@ -65,6 +72,7 @@ final class Session {
     }
 
     func stop() {
+        calls.shutdown()
         syncTask?.cancel()
         syncTask = nil
     }

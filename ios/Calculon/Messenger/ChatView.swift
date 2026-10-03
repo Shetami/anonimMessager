@@ -6,6 +6,7 @@ import SwiftUI
 struct ChatView: View {
     let contactID: String
     @Environment(MessengerService.self) private var service
+    @Environment(CallService.self) private var calls
     @State private var draft = ""
     @State private var messages: [ChatMessage] = []
     @State private var sendError: String?
@@ -28,7 +29,11 @@ struct ChatView: View {
                         RequestBanner(contact: c)
                     }
                     ForEach(messages) { m in
-                        Bubble(message: m, open: open).id(m.id)
+                        if let info = m.call {
+                            CallLogRow(message: m, info: info).id(m.id)
+                        } else {
+                            Bubble(message: m, open: open).id(m.id)
+                        }
                     }
                 }
                 .padding(.horizontal, 12)
@@ -44,7 +49,17 @@ struct ChatView: View {
         .navigationTitle(contact?.name ?? "")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                // Message requests can't be called until accepted (the peer's
+                // side ignores them the same way).
+                if let c = contact, !c.isRequest {
+                    Button { Task { await calls.call(contactID, video: true) } } label: { Image(systemName: "video") }
+                        .accessibilityLabel("Видеозвонок")
+                        .disabled(calls.current != nil)
+                    Button { Task { await calls.call(contactID, video: false) } } label: { Image(systemName: "phone") }
+                        .accessibilityLabel("Звонок")
+                        .disabled(calls.current != nil)
+                }
                 Button { showInfo = true } label: {
                     if let t = contact?.disappearAfter {
                         Label(DisappearOption.label(t), systemImage: "timer")

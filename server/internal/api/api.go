@@ -8,11 +8,13 @@
 //	PUT    /v1/keys                   rotate / replenish prekeys (auth)
 //	GET    /v1/keys/count             remaining one-time prekeys (auth)
 //	PUT    /v1/messages/{id}          deposit a sealed envelope (unauthenticated, no sender)
-//	GET    /v1/messages               fetch own envelopes (auth)
+//	GET    /v1/messages[?wait=N]      fetch own envelopes (auth); with wait, hold the
+//	                                  request up to N seconds until one arrives
 //	POST   /v1/messages/ack           delete fetched envelopes (auth)
 //	PUT    /v1/attachments/{id}       upload an encrypted attachment (unauthenticated)
 //	GET    /v1/attachments/{id}       download it (the random ID is the capability)
 //	DELETE /v1/attachments/{id}       delete it once downloaded
+//	GET    /v1/turn                   short-lived TURN credentials for calls (unauthenticated)
 //
 // Deliberately absent: request logging, IP storage, sender identification.
 package api
@@ -36,6 +38,9 @@ const (
 	maxJSONBody   = 512 << 10
 	maxPreKeys    = 200
 	fetchPageSize = 100
+	// Long-poll limit: must stay below the server's WriteTimeout and the
+	// client's request timeout.
+	maxFetchWait = 25 * time.Second
 	// Attachments are far larger than envelopes: give their transfers more
 	// time than the server-wide timeouts allow.
 	attachmentTimeout = 15 * time.Minute
@@ -45,7 +50,10 @@ type Server struct {
 	store   *store.Store
 	blobs   *blobs.Store // nil = attachments disabled
 	replays *replayCache
+	waiters *waiters
 	now     func() time.Time
+	// TURN enables call relaying (nil = calls unavailable).
+	TURN *TURNConfig
 	// DebugAuth logs why authentication failed (never IPs or bodies). Clients
 	// always get the same 401 either way.
 	DebugAuth bool
@@ -59,7 +67,7 @@ func (s *Server) authFail(w http.ResponseWriter, r *http.Request, reason string)
 }
 
 func New(s *store.Store, b *blobs.Store) *Server {
-	return &Server{store: s, blobs: b, replays: newReplayCache(), now: time.Now}
+	return &Server{store: s, blobs: b, replays: newReplayCache(), waiters: newWaiters(), now: time.Now}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -75,6 +83,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/attachments/{id}", s.putAttachment)
 	mux.HandleFunc("GET /v1/attachments/{id}", s.getAttachment)
 	mux.HandleFunc("DELETE /v1/attachments/{id}", s.deleteAttachment)
+	mux.HandleFunc("GET /v1/turn", s.turn)
 	return securityHeaders(mux)
 }
 
@@ -260,12 +269,25 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		httpError(w, http.StatusInternalServerError)
 	default:
+		s.waiters.notify(r.PathValue("id"))
 		w.WriteHeader(http.StatusAccepted)
 	}
 }
 
-func (s *Server) fetch(w http.ResponseWriter, _ *http.Request, id string, _ []byte) {
+func (s *Server) fetch(w http.ResponseWriter, r *http.Request, id string, _ []byte) {
+	wait := time.Duration(0)
+	if v := r.URL.Query().Get("wait"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			httpError(w, http.StatusBadRequest)
+			return
+		}
+		wait = min(time.Duration(n)*time.Second, maxFetchWait)
+	}
 	msgs, err := s.store.Fetch(id, fetchPageSize)
+	if err == nil && len(msgs) == 0 && wait > 0 {
+		msgs, err = s.waitAndFetch(r, id, wait)
+	}
 	if err != nil {
 		httpError(w, http.StatusInternalServerError)
 		return
@@ -274,6 +296,26 @@ func (s *Server) fetch(w http.ResponseWriter, _ *http.Request, id string, _ []by
 		msgs = []store.Envelope{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
+}
+
+// waitAndFetch blocks until an envelope arrives for id, the wait elapses or
+// the client goes away, then fetches again.
+func (s *Server) waitAndFetch(r *http.Request, id string, wait time.Duration) ([]store.Envelope, error) {
+	woken, done := s.waiters.add(id)
+	defer done()
+	// An envelope may have arrived between the first fetch and add().
+	if msgs, err := s.store.Fetch(id, fetchPageSize); err != nil || len(msgs) > 0 {
+		return msgs, err
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-woken:
+	case <-t.C:
+	case <-r.Context().Done():
+		return nil, nil
+	}
+	return s.store.Fetch(id, fetchPageSize)
 }
 
 func (s *Server) ack(w http.ResponseWriter, _ *http.Request, id string, body []byte) {

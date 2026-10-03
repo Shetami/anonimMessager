@@ -4,7 +4,6 @@
 package store
 
 import (
-	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -221,8 +220,10 @@ func (s *Store) DeleteAccount(id string) error {
 }
 
 // Enqueue stores a sealed envelope for a mailbox. Message keys are
-// expiry(8 bytes BE) || random(8 bytes), so iteration order is FIFO and the
-// janitor can stop at the first non-expired key.
+// expiry(8 bytes BE) || per-mailbox sequence(8 bytes BE), so iteration order
+// is strictly FIFO, even within one second (call signaling depends on the
+// offer arriving before its ICE candidates), and the janitor can stop at the
+// first non-expired key.
 func (s *Store) Enqueue(id string, data []byte) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		if tx.Bucket(bAccounts).Get([]byte(id)) == nil {
@@ -235,11 +236,13 @@ func (s *Store) Enqueue(id string, data []byte) error {
 		if countKeys(q, s.maxQueue) >= s.maxQueue {
 			return ErrQueueFull
 		}
-		key := make([]byte, 16)
-		binary.BigEndian.PutUint64(key, uint64(s.now().Add(s.ttl).Unix()))
-		if _, err := rand.Read(key[8:]); err != nil {
+		seq, err := q.NextSequence()
+		if err != nil {
 			return err
 		}
+		key := make([]byte, 16)
+		binary.BigEndian.PutUint64(key, uint64(s.now().Add(s.ttl).Unix()))
+		binary.BigEndian.PutUint64(key[8:], seq)
 		return q.Put(key, data)
 	})
 }

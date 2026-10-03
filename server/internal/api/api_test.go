@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,7 +49,9 @@ func (c *client) do(method, path string, body []byte, auth bool) *http.Response 
 	if auth {
 		ts := time.Now().Unix()
 		nonce := hex.EncodeToString(randBytes(16))
-		sig := ed25519.Sign(c.priv, SigningPayload(method, path, ts, nonce, body))
+		// The signature covers the path only, not the query string.
+		signed, _, _ := strings.Cut(path, "?")
+		sig := ed25519.Sign(c.priv, SigningPayload(method, signed, ts, nonce, body))
 		req.Header.Set("Authorization", fmt.Sprintf("Calc %s:%d:%s:%s", c.id, ts, nonce, base64.StdEncoding.EncodeToString(sig)))
 	}
 	resp, err := http.DefaultClient.Do(req)

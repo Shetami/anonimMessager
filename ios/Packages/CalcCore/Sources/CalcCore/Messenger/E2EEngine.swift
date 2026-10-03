@@ -79,6 +79,8 @@ public struct ChatMessage: Codable, Identifiable, Hashable, Sendable {
     public var status: Status
     public var expiresAt: Date?
     public var attachments: [AttachmentPointer]? = nil
+    /// Set for call-log entries (body is empty).
+    public var call: CallInfo? = nil
 }
 
 /// Everything needed to fetch and decrypt one attachment from the relay.
@@ -123,7 +125,7 @@ public struct OutgoingAttachment: Sendable {
 /// Plaintext inside the Signal message. Timestamps and everything else about
 /// the message are only ever visible end-to-end.
 public struct MessagePayload: Codable, Sendable {
-    public enum Kind: String, Codable, Sendable { case text, timer, delivered, read }
+    public enum Kind: String, Codable, Sendable { case text, timer, delivered, read, call }
 
     public var kind: Kind
     public var id: String
@@ -133,4 +135,5 @@ public struct MessagePayload: Codable, Sendable {
     /// Message IDs a delivered/read receipt refers to.
     public var ids: [String]? = nil
     public var attachments: [AttachmentPointer]? = nil
+    public var call: CallSignal? = nil
 }

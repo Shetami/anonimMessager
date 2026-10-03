@@ -37,7 +37,8 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIRequiresFullScreen: true
         UIApplicationSupportsIndirectInputEvents: true
-        NSCameraUsageDescription: Сканирование QR-кодов.
+        NSCameraUsageDescription: Сканирование QR-кодов и видеосвязь.
+        NSMicrophoneUsageDescription: Аудио- и видеосвязь.
         ITSAppUsesNonExemptEncryption: true
         # Plain HTTP is allowed only to local-network hosts (dev relay on the
         # LAN); everything on the internet still requires HTTPS.

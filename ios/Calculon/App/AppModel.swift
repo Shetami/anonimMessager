@@ -195,6 +195,8 @@ final class AppModel {
         case .background:
             backgroundedAt = Date()
             updateObscured(active: false)
+            // Calls only run in the foreground (no CallKit, no background audio).
+            if case .messenger(let s) = phase { s.calls.shutdown() }
             if case .messenger(let s) = phase, s.autoLockSeconds <= 0 { lock() }
             if case .planner = phase { draft = "" }
         @unknown default:

@@ -14,5 +14,9 @@ enum AppConfig {
         ]
     )
 
+    /// Fallback polling when the relay doesn't hold requests open (or fails).
     static let pollInterval: Duration = .seconds(5)
+    /// How long the relay may hold a fetch open waiting for new envelopes
+    /// (long poll): incoming calls and messages arrive within moments.
+    static let longPollSeconds = 20
 }

@@ -63,7 +63,7 @@ final class FakeRelay: RelayTransport, @unchecked Sendable {
         guard accounts[id] != nil else { throw RelayError.notFound }
         queues[id, default: []].append(RelayEnvelope(id: UUID().uuidString, data: envelope))
     }
-    func fetch(auth: RelayAuth) async throws -> [RelayEnvelope] { queues[auth.accountID] ?? [] }
+    func fetch(auth: RelayAuth, wait: Int) async throws -> [RelayEnvelope] { queues[auth.accountID] ?? [] }
     func ack(_ ids: [String], auth: RelayAuth) async throws {
         queues[auth.accountID]?.removeAll { ids.contains($0.id) }
     }
@@ -77,6 +77,11 @@ final class FakeRelay: RelayTransport, @unchecked Sendable {
         return b
     }
     func deleteAttachment(_ id: String) async throws { blobs[id] = nil }
+    var turnRequests = 0
+    func turnCredentials() async throws -> TurnCredentials {
+        turnRequests += 1
+        return TurnCredentials(username: "\(turnRequests)", password: "p", urls: ["turn:t"], ttl: 12 * 3600)
+    }
 }
 
 @MainActor

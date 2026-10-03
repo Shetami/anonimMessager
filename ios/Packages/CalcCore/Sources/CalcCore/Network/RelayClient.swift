@@ -32,12 +32,16 @@ public protocol RelayTransport: Sendable {
     func updateKeys(_ update: KeysUpdate, auth: RelayAuth) async throws
     func keyCounts(auth: RelayAuth) async throws -> KeyCounts
     func send(_ envelope: Data, to id: String) async throws
-    func fetch(auth: RelayAuth) async throws -> [RelayEnvelope]
+    /// With `wait` > 0 the relay holds the request (long poll) until an
+    /// envelope arrives or that many seconds pass.
+    func fetch(auth: RelayAuth, wait: Int) async throws -> [RelayEnvelope]
     func ack(_ ids: [String], auth: RelayAuth) async throws
     /// Attachments are unauthenticated: the random blob ID is the capability.
     func uploadAttachment(_ blob: Data, id: String) async throws
     func downloadAttachment(_ id: String) async throws -> Data
     func deleteAttachment(_ id: String) async throws
+    /// Unauthenticated, so the relay can't tie them to a mailbox.
+    func turnCredentials() async throws -> TurnCredentials
 }
 
 public final class RelayClient: NSObject, RelayTransport, URLSessionDelegate, @unchecked Sendable {
@@ -85,8 +89,12 @@ public final class RelayClient: NSObject, RelayTransport, URLSessionDelegate, @u
         _ = try await call("PUT", "/v1/messages/\(id)", body: envelope)
     }
 
-    public func fetch(auth: RelayAuth) async throws -> [RelayEnvelope] {
-        try JSONDecoder().decode(FetchResponse.self, from: try await call("GET", "/v1/messages", auth: auth)).messages
+    public func fetch(auth: RelayAuth, wait: Int) async throws -> [RelayEnvelope] {
+        let data = wait > 0
+            ? try await call("GET", "/v1/messages", query: [URLQueryItem(name: "wait", value: String(wait))],
+                             auth: auth, timeout: TimeInterval(wait) + 15)
+            : try await call("GET", "/v1/messages", auth: auth)
+        return try JSONDecoder().decode(FetchResponse.self, from: data).messages
     }
 
     public func ack(_ ids: [String], auth: RelayAuth) async throws {
@@ -109,15 +117,22 @@ public final class RelayClient: NSObject, RelayTransport, URLSessionDelegate, @u
         _ = try await call("DELETE", "/v1/attachments/\(id)")
     }
 
+    public func turnCredentials() async throws -> TurnCredentials {
+        try JSONDecoder().decode(TurnCredentials.self, from: try await call("GET", "/v1/turn"))
+    }
+
     static let attachmentTimeout: TimeInterval = 15 * 60
 
     public static func isValidBlobID(_ id: String) -> Bool {
         id.count == 32 && id.allSatisfy { $0.isHexDigit && !$0.isUppercase }
     }
 
-    private func call(_ method: String, _ path: String, body: Data = Data(), auth: RelayAuth? = nil,
-                      timeout: TimeInterval? = nil) async throws -> Data {
-        var req = URLRequest(url: config.baseURL.appendingPathComponent(path))
+    /// The auth signature covers `path` only, never the query string.
+    private func call(_ method: String, _ path: String, query: [URLQueryItem] = [], body: Data = Data(),
+                      auth: RelayAuth? = nil, timeout: TimeInterval? = nil) async throws -> Data {
+        var url = config.baseURL.appendingPathComponent(path)
+        if !query.isEmpty { url.append(queryItems: query) }
+        var req = URLRequest(url: url)
         req.httpMethod = method
         if let timeout { req.timeoutInterval = timeout }
         if !body.isEmpty {

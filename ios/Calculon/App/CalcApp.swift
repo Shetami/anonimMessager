@@ -40,6 +40,7 @@ struct RootView: View {
                     MessengerRootView()
                         .environment(session)
                         .environment(session.service)
+                        .environment(session.calls)
                 }
                 .ignoresSafeArea()
             }
