@@ -28,7 +28,7 @@ targets:
     info:
       path: Calculon/Info.plist
       properties:
-        CFBundleDisplayName: Калькулятор
+        CFBundleDisplayName: Ежедневник
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
         UILaunchScreen:
@@ -37,7 +37,6 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIRequiresFullScreen: true
         UIApplicationSupportsIndirectInputEvents: true
-        UIUserInterfaceStyle: Dark
         NSCameraUsageDescription: Сканирование QR-кодов.
         ITSAppUsesNonExemptEncryption: true
         # Plain HTTP is allowed only to local-network hosts (dev relay on the

@@ -25,7 +25,7 @@ struct SettingsView: View {
                         Text("5 минут").tag(TimeInterval(300))
                     }
                 } footer: {
-                    Text("Через это время в фоне приложение снова станет калькулятором.")
+                    Text("Через это время в фоне приложение снова станет ежедневником.")
                 }
 
                 Section {
@@ -85,8 +85,8 @@ struct SettingsView: View {
     }
 }
 
-/// Code entry on a calculator-style keypad, since the code is what you will
-/// type on the calculator. Saving runs PBKDF2, which takes about a second.
+/// Code entry. The code is what you will type as a new task in the planner.
+/// Saving runs PBKDF2, which takes about a second.
 struct CodeEntryView: View {
     let title: String
     let save: (String) -> String?
@@ -102,11 +102,10 @@ struct CodeEntryView: View {
                     SecureField("Код", text: $code)
                     SecureField("Повторите", text: $confirm)
                 } footer: {
-                    Text("Используйте цифры и знаки + − × ÷ . — ровно то, что будете набирать на калькуляторе перед «=». Например: 1337×42")
+                    Text("Любой текст от \(Vault.minimumCodeLength) символов — ровно то, что будете вводить как новую задачу в ежедневнике. Регистр не важен. Лучше фраза, которая выглядит как обычная задача, но которую вы никогда не напишете случайно: например «Забрать 7 коробок у Лены».")
                 }
                 if let error { Section { Text(error).foregroundStyle(.red) } }
             }
-            .keyboardType(.numbersAndPunctuation)
             .autocorrectionDisabled()
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
@@ -115,19 +114,11 @@ struct CodeEntryView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Сохранить") {
                         guard code == confirm else { error = "Коды не совпадают."; return }
-                        if let e = save(Self.normalize(code)) { error = e } else { dismiss() }
+                        if let e = save(TodoStore.code(from: code)) { error = e } else { dismiss() }
                     }
                     .disabled(code.isEmpty)
                 }
             }
         }
-    }
-
-    /// Maps ASCII operators to the symbols the calculator keypad produces.
-    static func normalize(_ s: String) -> String {
-        s.replacingOccurrences(of: "*", with: "×")
-            .replacingOccurrences(of: "/", with: "÷")
-            .replacingOccurrences(of: "-", with: "−")
-            .replacingOccurrences(of: " ", with: "")
     }
 }

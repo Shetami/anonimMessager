@@ -12,7 +12,6 @@ struct CalcApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
-                .preferredColorScheme(.dark)
         }
         .onChange(of: scenePhase) { _, phase in
             model.scenePhaseChanged(phase)
@@ -34,8 +33,8 @@ struct RootView: View {
     var body: some View {
         ZStack {
             switch model.phase {
-            case .calculator:
-                CalculatorView()
+            case .planner:
+                PlannerView()
             case .messenger(let session):
                 ScreenshotShield {
                     MessengerRootView()
@@ -46,10 +45,13 @@ struct RootView: View {
             }
             // While inactive (app switcher snapshot, control center, incoming
             // call) or while the screen is recorded/mirrored, only the
-            // calculator is ever visible.
+            // planner is ever visible.
             if model.obscured, case .messenger = model.phase {
-                CalculatorView().transition(.identity)
+                PlannerView().transition(.identity)
             }
         }
+        // The planner follows the system appearance like any ordinary app;
+        // the messenger is always dark.
+        .preferredColorScheme(model.isMessengerOpen ? .dark : nil)
     }
 }

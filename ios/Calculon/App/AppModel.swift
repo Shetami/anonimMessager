@@ -4,13 +4,13 @@ import Observation
 import SwiftUI
 import UIKit
 
-/// Top-level state: the calculator disguise, vault unlock and the unlocked
+/// Top-level state: the planner disguise, vault unlock and the unlocked
 /// messenger session.
 @MainActor
 @Observable
 final class AppModel {
     enum Phase {
-        case calculator
+        case planner
         case messenger(Session)
     }
 
@@ -19,20 +19,33 @@ final class AppModel {
         case confirm(String)
     }
 
-    private(set) var phase: Phase = .calculator
-    var calculator = CalculatorEngine()
+    private(set) var phase: Phase = .planner
+    var isMessengerOpen: Bool {
+        if case .messenger = phase { return true }
+        return false
+    }
+    var planner = TodoStore(fileURL: AppModel.plannerURL)
+    /// Text in the "new task" field. Lives here so it can be wiped on lock and
+    /// on background: a half-typed code must not linger on screen.
+    var draft = ""
     private(set) var setupStep: SetupStep?
     private(set) var setupMessage: String?
     private(set) var obscured = false
 
     @ObservationIgnored let vault: Vault
     @ObservationIgnored private var unlockTask: Task<Void, Never>?
-    @ObservationIgnored private var pendingCode: String?
+    @ObservationIgnored private var unlockQueue: [(task: UUID, code: String)] = []
     @ObservationIgnored private var backgroundedAt: Date?
 
     static var storageDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("calc", isDirectory: true)
+    }
+
+    static var plannerURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("planner", isDirectory: true)
+            .appendingPathComponent("tasks.json")
     }
 
     init() {
@@ -45,37 +58,42 @@ final class AppModel {
         }
     }
 
-    // MARK: - Keypad
+    // MARK: - New task
 
-    func press(_ key: CalcKey) {
-        guard let submitted = calculator.press(key) else { return }
+    func submitDraft(on day: Date) {
+        let text = TodoStore.normalize(draft)
+        draft = ""
+        guard !text.isEmpty else { return }
+        let code = TodoStore.code(from: text)
         if setupStep != nil {
-            handleSetup(submitted)
-        } else {
-            attemptUnlock(submitted)
-        }
-    }
-
-    /// Every "=" is silently tried against the vault in the background, so
-    /// the calculator always responds instantly and a wrong code looks exactly
-    /// like a normal calculation.
-    private func attemptUnlock(_ code: String) {
-        guard code.count >= Vault.minimumCodeLength else { return }
-        if unlockTask != nil {
-            pendingCode = code // only the latest submission matters
+            handleSetup(code)
             return
         }
+        let mayBeCode = code.count >= Vault.minimumCodeLength
+        guard let task = planner.add(text, on: day, held: mayBeCode) else { return }
+        if mayBeCode { attemptUnlock(task: task.id, code: code) }
+    }
+
+    /// Every new task is silently tried against the vault in the background.
+    /// It appears in the list instantly either way, so a wrong code looks
+    /// exactly like an ordinary task; it is only written to disk once the
+    /// vault has rejected it.
+    private func attemptUnlock(task: UUID, code: String) {
+        unlockQueue.append((task, code))
+        guard unlockTask == nil else { return }
         let vault = self.vault
         unlockTask = Task {
-            let profile = await Task.detached(priority: .userInitiated) { try? vault.unlock(code: code) }.value
-            unlockTask = nil
-            if let profile {
-                pendingCode = nil
-                openProfile(profile)
-            } else if let next = pendingCode {
-                pendingCode = nil
-                attemptUnlock(next)
+            while !unlockQueue.isEmpty {
+                let (task, code) = unlockQueue.removeFirst()
+                let profile = await Task.detached(priority: .userInitiated) { try? vault.unlock(code: code) }.value
+                guard let profile else {
+                    planner.release(task)
+                    continue
+                }
+                planner.discard(task)
+                if case .planner = phase { openProfile(profile) }
             }
+            unlockTask = nil
         }
     }
 
@@ -90,12 +108,10 @@ final class AppModel {
             }
             setupMessage = nil
             setupStep = .confirm(code)
-            calculator.wipe()
         case .confirm(let first):
             guard code == first else {
                 setupMessage = "Коды не совпали, попробуйте ещё раз"
                 setupStep = .choose
-                calculator.wipe()
                 return
             }
             do {
@@ -123,7 +139,7 @@ final class AppModel {
         do {
             enter(try makeSession(profile))
         } catch {
-            calculator.wipe()
+            draft = ""
         }
     }
 
@@ -138,24 +154,25 @@ final class AppModel {
     }
 
     private func enter(_ session: Session) {
-        calculator.wipe() // the code must not stay in history/display
+        draft = ""
         phase = .messenger(session)
         session.start()
     }
 
     func lock() {
         if case .messenger(let session) = phase { session.stop() }
-        phase = .calculator
-        calculator.wipe()
+        phase = .planner
+        draft = ""
     }
 
     /// Panic wipe: removes the account from the relay (best effort), then
-    /// crypto-erases the vault. The app returns to a fresh calculator.
+    /// crypto-erases the vault. The app returns to the planner (its tasks are
+    /// kept: they are the cover story) and asks for a new code.
     func wipeEverything() {
         if case .messenger(let session) = phase { session.stop() }
-        phase = .calculator
+        phase = .planner
         vault.destroy()
-        calculator = CalculatorEngine()
+        draft = ""
         setupStep = .choose
     }
 
@@ -176,7 +193,7 @@ final class AppModel {
             backgroundedAt = Date()
             updateObscured(active: false)
             if case .messenger(let s) = phase, s.autoLockSeconds <= 0 { lock() }
-            if case .calculator = phase { calculator.wipe() }
+            if case .planner = phase { draft = "" }
         @unknown default:
             break
         }
