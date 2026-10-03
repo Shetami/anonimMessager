@@ -1,4 +1,6 @@
 import CalcCore
+import PhotosUI
+import QuickLook
 import SwiftUI
 
 struct ChatView: View {
@@ -8,6 +10,13 @@ struct ChatView: View {
     @State private var messages: [ChatMessage] = []
     @State private var sendError: String?
     @State private var showInfo = false
+    @State private var pending: [OutgoingAttachment] = []
+    @State private var preparing = false
+    @State private var showPhotoPicker = false
+    @State private var showFileImporter = false
+    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var viewing: AttachmentPointer?
+    @State private var previewURL: URL?
 
     private var contact: Contact? { service.contact(contactID) }
 
@@ -19,7 +28,7 @@ struct ChatView: View {
                         RequestBanner(contact: c)
                     }
                     ForEach(messages) { m in
-                        Bubble(message: m).id(m.id)
+                        Bubble(message: m, open: open).id(m.id)
                     }
                 }
                 .padding(.horizontal, 12)
@@ -46,6 +55,29 @@ struct ChatView: View {
             }
         }
         .sheet(isPresented: $showInfo) { ContactInfoView(contactID: contactID) }
+        .photosPicker(isPresented: $showPhotoPicker, selection: $photoItems,
+                      maxSelectionCount: max(1, MessengerService.maxAttachments - pending.count),
+                      matching: .any(of: [.images, .videos]), preferredItemEncoding: .compatible)
+        .onChange(of: photoItems) { _, items in
+            guard !items.isEmpty else { return }
+            photoItems = []
+            addAttachments { try await items.asyncMap(AttachmentPreparer.prepare) }
+        }
+        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+            guard case .success(let urls) = result else { return }
+            addAttachments { try urls.map(AttachmentPreparer.prepare(fileAt:)) }
+        }
+        .quickLookPreview($previewURL)
+        .onChange(of: previewURL) { _, url in
+            if url == nil { TempFiles.removeAll() }
+        }
+        .overlay {
+            if let viewing {
+                PhotoViewer(pointer: viewing) { self.viewing = nil }
+                    .transition(.opacity)
+            }
+        }
+        .onDisappear { TempFiles.removeAll() }
         .task(id: contactID) {
             // Refresh while the chat is open; also expires disappearing messages.
             while !Task.isCancelled {
@@ -59,8 +91,32 @@ struct ChatView: View {
         } message: { Text(sendError ?? "") }
     }
 
+    private var canSend: Bool {
+        !preparing && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pending.isEmpty)
+    }
+
     private var composer: some View {
+        VStack(spacing: 0) {
+            if !pending.isEmpty || preparing {
+                HStack {
+                    PendingAttachmentsStrip(items: $pending)
+                    if preparing { ProgressView().padding(.horizontal, 12).padding(.top, 10) }
+                }
+            }
+            composerRow
+        }
+        .background(.bar)
+    }
+
+    private var composerRow: some View {
         HStack(alignment: .bottom, spacing: 8) {
+            Menu {
+                Button("Фото и видео", systemImage: "photo.on.rectangle") { showPhotoPicker = true }
+                Button("Файл", systemImage: "doc") { showFileImporter = true }
+            } label: {
+                Image(systemName: "paperclip").font(.system(size: 22)).frame(width: 32, height: 36)
+            }
+            .disabled(pending.count >= MessengerService.maxAttachments || preparing)
             TextField("Сообщение", text: $draft, axis: .vertical)
                 .lineLimit(1...6)
                 // No autocorrect / predictive learning: the system keyboard
@@ -73,43 +129,88 @@ struct ChatView: View {
                 .background(Color(white: 0.15), in: RoundedRectangle(cornerRadius: 18))
             Button {
                 let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else { return }
+                let attachments = pending
+                guard !text.isEmpty || !attachments.isEmpty else { return }
                 draft = ""
+                pending = []
                 Task {
                     do {
-                        try await service.send(text, to: contactID)
+                        try await service.send(text, attachments: attachments, to: contactID)
+                    } catch RelayError.tooLarge {
+                        sendError = "Сервер не принял файл: он слишком большой."
+                    } catch RelayError.storageFull {
+                        sendError = "На сервере закончилось место для файлов."
                     } catch {
                         sendError = "Проверьте соединение с сервером."
                     }
                     messages = service.messages(with: contactID)
                 }
+                // Show the message (with its "sending" clock) right away.
+                Task { messages = service.messages(with: contactID) }
             } label: {
                 Image(systemName: "arrow.up.circle.fill").font(.system(size: 32))
             }
-            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(!canSend)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.bar)
+    }
+
+    /// Prepares picked items off the composer, keeping at most the limit.
+    private func addAttachments(_ load: @escaping () async throws -> [OutgoingAttachment]) {
+        preparing = true
+        Task {
+            defer { preparing = false }
+            do {
+                let new = try await load()
+                let room = MessengerService.maxAttachments - pending.count
+                if new.count > room {
+                    sendError = "Можно приложить не больше \(MessengerService.maxAttachments) файлов."
+                }
+                pending += new.prefix(max(0, room))
+            } catch {
+                sendError = error.localizedDescription
+            }
+        }
+    }
+
+    /// Photos open in the shielded in-chat viewer; videos and documents in
+    /// QuickLook from a temporary decrypted copy.
+    private func open(_ p: AttachmentPointer) {
+        if p.isImage {
+            withAnimation { viewing = p }
+            return
+        }
+        Task {
+            guard let data = try? await service.attachmentData(p),
+                  let url = try? TempFiles.write(data, name: p.name) else { return }
+            previewURL = url
+        }
     }
 }
 
 struct Bubble: View {
     let message: ChatMessage
+    var open: (AttachmentPointer) -> Void = { _ in }
 
     var body: some View {
         HStack {
             if message.outgoing { Spacer(minLength: 48) }
             VStack(alignment: message.outgoing ? .trailing : .leading, spacing: 2) {
-                Text(message.body)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(message.outgoing ? Color.orange : Color(white: 0.2),
-                                in: RoundedRectangle(cornerRadius: 16))
-                    .foregroundStyle(message.outgoing ? .black : .white)
-                    .contextMenu {
-                        Button("Скопировать", systemImage: "doc.on.doc") { SecurePasteboard.copy(message.body) }
-                    }
+                if message.attachments?.isEmpty == false {
+                    AttachmentList(message: message, open: open)
+                }
+                if !message.body.isEmpty {
+                    Text(message.body)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(message.outgoing ? Color.orange : Color(white: 0.2),
+                                    in: RoundedRectangle(cornerRadius: 16))
+                        .foregroundStyle(message.outgoing ? .black : .white)
+                        .contextMenu {
+                            Button("Скопировать", systemImage: "doc.on.doc") { SecurePasteboard.copy(message.body) }
+                        }
+                }
                 HStack(spacing: 4) {
                     if message.expiresAt != nil { Image(systemName: "timer") }
                     Text(message.sentAt, style: .time)
@@ -175,5 +276,13 @@ enum DisappearOption {
         case 604800?: return "1 нед"
         case let s?: return "\(Int(s)) с"
         }
+    }
+}
+
+extension Sequence {
+    func asyncMap<T>(_ transform: (Element) async throws -> T) async rethrows -> [T] {
+        var out: [T] = []
+        for element in self { out.append(try await transform(element)) }
+        return out
     }
 }

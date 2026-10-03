@@ -78,6 +78,46 @@ public struct ChatMessage: Codable, Identifiable, Hashable, Sendable {
     public var sentAt: Date
     public var status: Status
     public var expiresAt: Date?
+    public var attachments: [AttachmentPointer]? = nil
+}
+
+/// Everything needed to fetch and decrypt one attachment from the relay.
+/// Travels only inside the end-to-end encrypted message.
+public struct AttachmentPointer: Codable, Hashable, Identifiable, Sendable {
+    /// Relay blob ID: 128 random bits, hex.
+    public var id: String
+    /// ChaCha20-Poly1305 key for this attachment only.
+    public var key: Data
+    /// Plaintext size in bytes.
+    public var size: Int
+    public var name: String
+    public var mime: String
+    /// Small JPEG preview for photos and videos.
+    public var thumbnail: Data?
+    public var width: Int?
+    public var height: Int?
+
+    public var isImage: Bool { mime.hasPrefix("image/") }
+    public var isVideo: Bool { mime.hasPrefix("video/") }
+}
+
+/// A file the user picked, before it is encrypted and uploaded.
+public struct OutgoingAttachment: Sendable {
+    public var data: Data
+    public var name: String
+    public var mime: String
+    public var thumbnail: Data?
+    public var width: Int?
+    public var height: Int?
+
+    public init(data: Data, name: String, mime: String, thumbnail: Data? = nil, width: Int? = nil, height: Int? = nil) {
+        self.data = data
+        self.name = name
+        self.mime = mime
+        self.thumbnail = thumbnail
+        self.width = width
+        self.height = height
+    }
 }
 
 /// Plaintext inside the Signal message. Timestamps and everything else about
@@ -92,4 +132,5 @@ public struct MessagePayload: Codable, Sendable {
     public var disappearAfter: TimeInterval?
     /// Message IDs a delivered/read receipt refers to.
     public var ids: [String]? = nil
+    public var attachments: [AttachmentPointer]? = nil
 }

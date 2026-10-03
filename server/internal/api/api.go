@@ -10,6 +10,9 @@
 //	PUT    /v1/messages/{id}          deposit a sealed envelope (unauthenticated, no sender)
 //	GET    /v1/messages               fetch own envelopes (auth)
 //	POST   /v1/messages/ack           delete fetched envelopes (auth)
+//	PUT    /v1/attachments/{id}       upload an encrypted attachment (unauthenticated)
+//	GET    /v1/attachments/{id}       download it (the random ID is the capability)
+//	DELETE /v1/attachments/{id}       delete it once downloaded
 //
 // Deliberately absent: request logging, IP storage, sender identification.
 package api
@@ -21,8 +24,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
+	"github.com/shetami/anonimmessager/server/internal/blobs"
 	"github.com/shetami/anonimmessager/server/internal/store"
 )
 
@@ -31,10 +36,14 @@ const (
 	maxJSONBody   = 512 << 10
 	maxPreKeys    = 200
 	fetchPageSize = 100
+	// Attachments are far larger than envelopes: give their transfers more
+	// time than the server-wide timeouts allow.
+	attachmentTimeout = 15 * time.Minute
 )
 
 type Server struct {
 	store   *store.Store
+	blobs   *blobs.Store // nil = attachments disabled
 	replays *replayCache
 	now     func() time.Time
 	// DebugAuth logs why authentication failed (never IPs or bodies). Clients
@@ -49,8 +58,8 @@ func (s *Server) authFail(w http.ResponseWriter, r *http.Request, reason string)
 	httpError(w, http.StatusUnauthorized)
 }
 
-func New(s *store.Store) *Server {
-	return &Server{store: s, replays: newReplayCache(), now: time.Now}
+func New(s *store.Store, b *blobs.Store) *Server {
+	return &Server{store: s, blobs: b, replays: newReplayCache(), now: time.Now}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -63,6 +72,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/messages/{id}", s.send)
 	mux.HandleFunc("GET /v1/messages", s.authed(s.fetch))
 	mux.HandleFunc("POST /v1/messages/ack", s.authed(s.ack))
+	mux.HandleFunc("PUT /v1/attachments/{id}", s.putAttachment)
+	mux.HandleFunc("GET /v1/attachments/{id}", s.getAttachment)
+	mux.HandleFunc("DELETE /v1/attachments/{id}", s.deleteAttachment)
 	return securityHeaders(mux)
 }
 
@@ -277,6 +289,68 @@ func (s *Server) ack(w http.ResponseWriter, _ *http.Request, id string, body []b
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) putAttachment(w http.ResponseWriter, r *http.Request) {
+	if s.blobs == nil {
+		httpError(w, http.StatusNotFound)
+		return
+	}
+	_ = http.NewResponseController(w).SetReadDeadline(s.now().Add(attachmentTimeout))
+	body := http.MaxBytesReader(w, r.Body, s.blobs.MaxSize())
+	var tooLarge *http.MaxBytesError
+	switch err := s.blobs.Put(r.PathValue("id"), body); {
+	case err == nil:
+		w.WriteHeader(http.StatusCreated)
+	case errors.As(err, &tooLarge), errors.Is(err, blobs.ErrTooLarge):
+		httpError(w, http.StatusRequestEntityTooLarge)
+	case errors.Is(err, blobs.ErrBadID), errors.Is(err, blobs.ErrEmpty):
+		httpError(w, http.StatusBadRequest)
+	case errors.Is(err, blobs.ErrExists):
+		httpError(w, http.StatusConflict)
+	case errors.Is(err, blobs.ErrFull):
+		httpError(w, http.StatusInsufficientStorage)
+	default:
+		httpError(w, http.StatusInternalServerError)
+	}
+}
+
+func (s *Server) getAttachment(w http.ResponseWriter, r *http.Request) {
+	if s.blobs == nil {
+		httpError(w, http.StatusNotFound)
+		return
+	}
+	f, err := s.blobs.Open(r.PathValue("id"))
+	if err != nil {
+		httpError(w, http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError)
+		return
+	}
+	_ = http.NewResponseController(w).SetWriteDeadline(s.now().Add(attachmentTimeout))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, f)
+}
+
+func (s *Server) deleteAttachment(w http.ResponseWriter, r *http.Request) {
+	if s.blobs == nil {
+		httpError(w, http.StatusNotFound)
+		return
+	}
+	switch err := s.blobs.Delete(r.PathValue("id")); {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, blobs.ErrNotFound), errors.Is(err, blobs.ErrBadID):
+		httpError(w, http.StatusNotFound)
+	default:
+		httpError(w, http.StatusInternalServerError)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

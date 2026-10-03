@@ -9,6 +9,8 @@ public enum MessengerError: Error, Equatable {
     case keyMismatch      // relay returned keys that don't match the contact ID
     case badSignature     // sealing key not signed by the contact's identity
     case unknownContact
+    case tooManyAttachments
+    case attachmentTooLarge
 }
 
 /// Coordinates one unlocked profile: identity, contacts, messages and the
@@ -19,11 +21,15 @@ public final class MessengerService {
     public private(set) var state: ProfileState?
     public private(set) var contacts: [Contact] = []
     public private(set) var lastSyncError: Error?
+    /// Attachment IDs being downloaded right now / whose last download failed.
+    public private(set) var downloading: Set<String> = []
+    public private(set) var failedDownloads: Set<String> = []
 
     public var accountID: String? { state?.accountID }
     public var hasSiblingSlot: Bool { (try? db.get(SiblingSlot.self, collection: C.meta, key: "sibling")) != nil }
 
     @ObservationIgnored public let db: SecureDatabase
+    @ObservationIgnored public let files: AttachmentStore
     @ObservationIgnored private let engine: E2EEngine
     @ObservationIgnored private let relay: RelayTransport
     @ObservationIgnored private var auth: RelayAuth?
@@ -33,6 +39,9 @@ public final class MessengerService {
     static let kyberBatch = 20
     static let replenishBelow = 20
     static let signedPreKeyLifetime: TimeInterval = 7 * 24 * 3600
+    public static let maxAttachments = 10
+    public static let maxAttachmentSize = 100 << 20
+    nonisolated static let maxThumbnailSize = 32 << 10
 
     enum C {
         static let meta = "meta"
@@ -42,6 +51,9 @@ public final class MessengerService {
 
     public init(db: SecureDatabase, engine: E2EEngine, relay: RelayTransport) {
         self.db = db
+        // Next to the database, with a name derived from it (which in turn is
+        // derived from the profile key), so profiles can't be linked.
+        self.files = AttachmentStore(directory: db.url.deletingPathExtension().appendingPathExtension("files"))
         self.engine = engine
         self.relay = relay
         load()
@@ -160,6 +172,9 @@ public final class MessengerService {
     }
 
     public func deleteContact(_ id: String) throws {
+        for m in (try? db.list(ChatMessage.self, collection: C.messages, group: id)) ?? [] {
+            deleteFiles(of: m)
+        }
         try db.deleteGroup(collection: C.messages, group: id)
         try db.delete(collection: C.contacts, key: id)
         try engine.deleteSession(with: id)
@@ -197,15 +212,31 @@ public final class MessengerService {
     }
 
     @discardableResult
-    public func send(_ text: String, to contactID: String) async throws -> ChatMessage {
+    public func send(_ text: String, attachments: [OutgoingAttachment] = [], to contactID: String) async throws -> ChatMessage {
         guard let c = contact(contactID) else { throw MessengerError.unknownContact }
+        guard attachments.count <= Self.maxAttachments else { throw MessengerError.tooManyAttachments }
+        guard attachments.allSatisfy({ $0.data.count <= Self.maxAttachmentSize }) else {
+            throw MessengerError.attachmentTooLarge
+        }
+        // Encrypt one at a time straight to disk, off the main actor, so only
+        // one file's ciphertext is ever in memory.
+        var pointers: [AttachmentPointer] = []
+        for a in attachments {
+            pointers.append(try await Self.encryptToDisk(a, files: files))
+        }
         let now = Date()
         var msg = ChatMessage(
             id: UUID().uuidString, contactID: contactID, outgoing: true, body: text, sentAt: now,
-            status: .sending, expiresAt: c.disappearAfter.map { now.addingTimeInterval($0) })
-        try saveMessage(msg, preview: text)
+            status: .sending, expiresAt: c.disappearAfter.map { now.addingTimeInterval($0) },
+            attachments: pointers.isEmpty ? nil : pointers)
+        try saveMessage(msg, preview: Self.preview(text, pointers))
         do {
-            try await deliver(MessagePayload(kind: .text, id: msg.id, body: text, sentAt: now, disappearAfter: c.disappearAfter), to: c)
+            for p in pointers {
+                try await relay.uploadAttachment(try files.read(p.id), id: p.id)
+            }
+            try await deliver(MessagePayload(kind: .text, id: msg.id, body: text, sentAt: now,
+                                             disappearAfter: c.disappearAfter,
+                                             attachments: pointers.isEmpty ? nil : pointers), to: c)
             // A receipt may already have upgraded it while we were awaiting.
             if let stored = try? db.get(ChatMessage.self, collection: C.messages, key: msg.id),
                stored.status != .sending {
@@ -219,6 +250,84 @@ public final class MessengerService {
         }
         try saveMessage(msg, preview: nil)
         return msg
+    }
+
+    nonisolated private static func encryptToDisk(_ a: OutgoingAttachment, files: AttachmentStore) async throws -> AttachmentPointer {
+        try await Task.detached(priority: .userInitiated) {
+            let key = SymmetricKey(size: .bits256)
+            let id = KeyDerivation.randomBytes(16).map { String(format: "%02x", $0) }.joined()
+            try files.write(try AttachmentCipher.encrypt(a.data, key: key), id: id)
+            return AttachmentPointer(
+                id: id, key: key.data, size: a.data.count,
+                name: sanitizedName(a.name), mime: a.mime,
+                thumbnail: a.thumbnail.flatMap { $0.count <= maxThumbnailSize ? $0 : nil },
+                width: a.width, height: a.height)
+        }.value
+    }
+
+    /// Text shown in the chat list for a message.
+    static func preview(_ text: String, _ attachments: [AttachmentPointer]) -> String {
+        guard text.isEmpty, let first = attachments.first else { return text }
+        let label = first.isImage ? "Фото" : first.isVideo ? "Видео" : first.name
+        return attachments.count == 1 ? "📎 \(label)" : "📎 \(label) и ещё \(attachments.count - 1)"
+    }
+
+    nonisolated static func sanitizedName(_ name: String) -> String {
+        let base = (name as NSString).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        return base.isEmpty ? "file" : String(base.prefix(120))
+    }
+
+    // MARK: - Attachments
+
+    /// Drops malformed pointers from a peer, and any that would collide with
+    /// a file we already have.
+    private func acceptedAttachments(_ pointers: [AttachmentPointer]?) -> [AttachmentPointer] {
+        (pointers ?? []).prefix(Self.maxAttachments).compactMap { p in
+            guard RelayClient.isValidBlobID(p.id), p.key.count == 32,
+                  (0...Self.maxAttachmentSize).contains(p.size),
+                  !files.contains(p.id)
+            else { return nil }
+            var p = p
+            p.name = Self.sanitizedName(p.name)
+            p.mime = String(p.mime.prefix(100))
+            if (p.thumbnail?.count ?? 0) > Self.maxThumbnailSize { p.thumbnail = nil }
+            return p
+        }
+    }
+
+    public func isDownloaded(_ p: AttachmentPointer) -> Bool { files.contains(p.id) }
+
+    /// Fetches an attachment, checks it decrypts, stores it and removes it
+    /// from the relay. Safe to call repeatedly.
+    public func download(_ p: AttachmentPointer) async {
+        guard !downloading.contains(p.id), !files.contains(p.id) else { return }
+        downloading.insert(p.id)
+        failedDownloads.remove(p.id)
+        defer { downloading.remove(p.id) }
+        do {
+            let blob = try await relay.downloadAttachment(p.id)
+            let files = files
+            try await Task.detached(priority: .utility) {
+                let plain = try AttachmentCipher.decrypt(blob, key: SymmetricKey(data: p.key))
+                guard plain.count == p.size else { throw AttachmentCipherError.malformed }
+                try files.write(blob, id: p.id)
+            }.value
+            try? await relay.deleteAttachment(p.id)
+        } catch {
+            failedDownloads.insert(p.id)
+        }
+    }
+
+    /// Decrypted contents of a downloaded (or sent) attachment.
+    public func attachmentData(_ p: AttachmentPointer) async throws -> Data {
+        let files = files
+        return try await Task.detached(priority: .userInitiated) {
+            try AttachmentCipher.decrypt(try files.read(p.id), key: SymmetricKey(data: p.key))
+        }.value
+    }
+
+    private func deleteFiles(of m: ChatMessage) {
+        for p in m.attachments ?? [] { files.delete(p.id) }
     }
 
     /// Sets the disappearing-messages timer for a chat and tells the peer.
@@ -249,6 +358,7 @@ public final class MessengerService {
         guard let auth, let sealing, state?.registered == true else { return 0 }
         var received = 0
         var delivered: [String: [String]] = [:] // contact ID → message IDs
+        var toDownload: [AttachmentPointer] = []
         do {
             while true {
                 let batch = try await relay.fetch(auth: auth)
@@ -257,6 +367,7 @@ public final class MessengerService {
                     if let msg = try? await handle(env.data, sealing: sealing) {
                         received += 1
                         delivered[msg.contactID, default: []].append(msg.id)
+                        toDownload += msg.attachments ?? []
                     }
                 }
                 try await relay.ack(batch.map(\.id), auth: auth)
@@ -266,6 +377,10 @@ public final class MessengerService {
             // until the read receipt arrives.
             for (contactID, ids) in delivered {
                 if let c = contact(contactID) { try? await sendReceipt(.delivered, ids: ids, to: c) }
+            }
+            if !toDownload.isEmpty {
+                // One at a time keeps memory bounded for large files.
+                Task { for p in toDownload { await self.download(p) } }
             }
             try await maintainKeys()
             purgeExpired()
@@ -313,6 +428,10 @@ public final class MessengerService {
         case .delivered, .read:
             return nil
         case .text:
+            // Message IDs are chosen by the sender: never let one replace a
+            // message we already have (a duplicate delivery or a forgery).
+            if (try? db.get(ChatMessage.self, collection: C.messages, key: payload.id)) != nil { return nil }
+            let attachments = acceptedAttachments(payload.attachments)
             if c.disappearAfter != payload.disappearAfter { c.disappearAfter = payload.disappearAfter }
             c.unread += 1
             try saveContact(c)
@@ -320,8 +439,9 @@ public final class MessengerService {
             let msg = ChatMessage(
                 id: payload.id, contactID: c.id, outgoing: false, body: payload.body,
                 sentAt: min(payload.sentAt, now), status: .received,
-                expiresAt: payload.disappearAfter.map { now.addingTimeInterval($0) })
-            try saveMessage(msg, preview: payload.body)
+                expiresAt: payload.disappearAfter.map { now.addingTimeInterval($0) },
+                attachments: attachments.isEmpty ? nil : attachments)
+            try saveMessage(msg, preview: Self.preview(payload.body, attachments))
             return msg
         }
     }
@@ -372,6 +492,7 @@ public final class MessengerService {
         for c in contacts {
             let all = (try? db.list(ChatMessage.self, collection: C.messages, group: c.id)) ?? []
             for m in all where (m.expiresAt.map { $0 <= now } ?? false) {
+                deleteFiles(of: m)
                 try? db.delete(collection: C.messages, key: m.id)
             }
         }

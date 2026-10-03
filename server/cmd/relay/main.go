@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/shetami/anonimmessager/server/internal/api"
+	"github.com/shetami/anonimmessager/server/internal/blobs"
 	"github.com/shetami/anonimmessager/server/internal/store"
 )
 
@@ -25,6 +26,9 @@ func main() {
 	maxQueue := flag.Int("max-queue", 5000, "max undelivered envelopes per mailbox")
 	cert := flag.String("tls-cert", "", "TLS certificate (PEM)")
 	key := flag.String("tls-key", "", "TLS private key (PEM)")
+	attachDir := flag.String("attachments", "attachments", "directory for encrypted attachments")
+	maxAttachment := flag.Int64("max-attachment", 110<<20, "max size of one encrypted attachment in bytes")
+	attachQuota := flag.Int64("attachments-quota", 20<<30, "max total size of stored attachments in bytes")
 	debugAuth := flag.Bool("debug-auth", false, "log why authentication fails (for development)")
 	flag.Parse()
 
@@ -34,7 +38,12 @@ func main() {
 	}
 	defer st.Close()
 
-	a := api.New(st)
+	bl, err := blobs.Open(*attachDir, *ttl, *maxAttachment, *attachQuota)
+	if err != nil {
+		log.Fatalf("open attachments: %v", err)
+	}
+
+	a := api.New(st, bl)
 	a.DebugAuth = *debugAuth
 	handler := a.Handler()
 
@@ -62,6 +71,9 @@ func main() {
 			case <-t.C:
 				if _, err := st.PurgeExpired(); err != nil {
 					log.Printf("purge: %v", err)
+				}
+				if _, err := bl.PurgeExpired(); err != nil {
+					log.Printf("purge attachments: %v", err)
 				}
 			}
 		}

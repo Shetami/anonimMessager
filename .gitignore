@@ -14,3 +14,5 @@ ios/Calculon/Calculon.entitlements
 # Server
 server/relay
 *.db
+server/relay.log
+server/attachments/

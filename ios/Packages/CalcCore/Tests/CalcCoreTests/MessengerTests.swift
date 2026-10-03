@@ -67,6 +67,16 @@ final class FakeRelay: RelayTransport, @unchecked Sendable {
     func ack(_ ids: [String], auth: RelayAuth) async throws {
         queues[auth.accountID]?.removeAll { ids.contains($0.id) }
     }
+    var blobs: [String: Data] = [:]
+    func uploadAttachment(_ blob: Data, id: String) async throws {
+        guard blobs[id] == nil else { throw RelayError.conflict }
+        blobs[id] = Data(blob)
+    }
+    func downloadAttachment(_ id: String) async throws -> Data {
+        guard let b = blobs[id] else { throw RelayError.notFound }
+        return b
+    }
+    func deleteAttachment(_ id: String) async throws { blobs[id] = nil }
 }
 
 @MainActor
@@ -125,6 +135,64 @@ struct MessengerTests {
         // Already reported: no second receipt.
         await bob.markRead(alice.accountID!)
         #expect(relay.queues[alice.accountID!, default: []].isEmpty)
+    }
+
+    @Test func attachments() async throws {
+        let relay = FakeRelay()
+        let alice = try makeService(relay)
+        let bob = try makeService(relay)
+        try await alice.register()
+        try await bob.register()
+        try await alice.addContact(id: bob.accountID!, name: "Bob", verifiedInPerson: false)
+
+        let photo = KeyDerivation.randomBytes(5000)
+        let doc = Data("secret report".utf8)
+        let sent = try await alice.send("", attachments: [
+            OutgoingAttachment(data: photo, name: "IMG_1.jpg", mime: "image/jpeg"),
+            OutgoingAttachment(data: doc, name: "../../report.txt", mime: "text/plain"),
+        ], to: bob.accountID!)
+        let pointers = try #require(sent.attachments)
+        #expect(pointers.map(\.name) == ["IMG_1.jpg", "report.txt"])
+        #expect(alice.contact(bob.accountID!)?.lastPreview == "📎 Фото и ещё 1")
+
+        // The relay holds only padded ciphertext.
+        let blob = try #require(relay.blobs[pointers[1].id])
+        #expect(blob.range(of: doc) == nil)
+        #expect(blob.count >= 1024)
+
+        #expect(await bob.sync() == 1)
+        let received = try #require(bob.messages(with: alice.accountID!).first?.attachments)
+        for p in received { await bob.download(p) }
+        #expect(received.allSatisfy(bob.isDownloaded))
+        #expect(try await bob.attachmentData(received[0]) == photo)
+        #expect(try await bob.attachmentData(received[1]) == doc)
+        #expect(relay.blobs.isEmpty) // recipient removed them after download
+        #expect(try await alice.attachmentData(pointers[1]) == doc)
+
+        try bob.deleteContact(alice.accountID!)
+        #expect(!received.contains(where: bob.isDownloaded))
+    }
+
+    @Test func attachmentLimits() async throws {
+        let relay = FakeRelay()
+        let alice = try makeService(relay)
+        let bob = try makeService(relay)
+        try await alice.register()
+        try await bob.register()
+        try await alice.addContact(id: bob.accountID!, name: "Bob", verifiedInPerson: false)
+        let eleven = (0..<11).map { OutgoingAttachment(data: Data([UInt8($0)]), name: "\($0)", mime: "text/plain") }
+        await #expect(throws: MessengerError.tooManyAttachments) {
+            try await alice.send("", attachments: eleven, to: bob.accountID!)
+        }
+        #expect(relay.blobs.isEmpty)
+    }
+
+    @Test func attachmentPaddingBuckets() {
+        #expect(AttachmentCipher.paddedSize(for: 0) == 1024)
+        for n in [1023, 1024, 50_000, 3_000_000] {
+            let size = AttachmentCipher.paddedSize(for: n)
+            #expect(size > n && Double(size) <= Double(n + 1) * 1.05 + 1)
+        }
     }
 
     @Test func rejectsSubstitutedKeys() async throws {

@@ -8,12 +8,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/shetami/anonimmessager/server/internal/blobs"
 	"github.com/shetami/anonimmessager/server/internal/store"
 )
 
@@ -31,7 +33,11 @@ func newServer(t *testing.T) *httptest.Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	srv := httptest.NewServer(New(st).Handler())
+	bl, err := blobs.Open(filepath.Join(t.TempDir(), "attachments"), time.Hour, 1024, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(st, bl).Handler())
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -193,5 +199,50 @@ func TestQueueLimitAndDelete(t *testing.T) {
 	}
 	if resp := anon.do("PUT", "/v1/messages/"+bob.id, []byte("x"), false); resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("send after delete: %d", resp.StatusCode)
+	}
+}
+
+func TestAttachments(t *testing.T) {
+	srv := newServer(t)
+	anon := &client{t: t, srv: srv}
+	id := hex.EncodeToString(randBytes(16))
+	blob := randBytes(1000)
+
+	if resp := anon.do("PUT", "/v1/attachments/"+id, blob, false); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("upload: %d", resp.StatusCode)
+	}
+	// IDs can't be reused, so a known ID can't be overwritten.
+	if resp := anon.do("PUT", "/v1/attachments/"+id, randBytes(10), false); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("overwrite: %d", resp.StatusCode)
+	}
+	resp := anon.do("GET", "/v1/attachments/"+id, nil, false)
+	got, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(got, blob) {
+		t.Fatalf("download: %d, %d bytes", resp.StatusCode, len(got))
+	}
+	if resp := anon.do("DELETE", "/v1/attachments/"+id, nil, false); resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete: %d", resp.StatusCode)
+	}
+	if resp := anon.do("GET", "/v1/attachments/"+id, nil, false); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("after delete: %d", resp.StatusCode)
+	}
+
+	big := hex.EncodeToString(randBytes(16))
+	if resp := anon.do("PUT", "/v1/attachments/"+big, randBytes(1025), false); resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized: %d", resp.StatusCode)
+	}
+	if resp := anon.do("GET", "/v1/attachments/"+big, nil, false); resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("oversized upload must not be stored: %d", resp.StatusCode)
+	}
+	if resp := anon.do("PUT", "/v1/attachments/..%2Fescape", blob, false); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad id: %d", resp.StatusCode)
+	}
+
+	// Quota is 4096 with a 1024 per-blob cap: four full blobs fit, the fifth doesn't.
+	for i, want := range []int{201, 201, 201, 201, 507} {
+		resp := anon.do("PUT", "/v1/attachments/"+hex.EncodeToString(randBytes(16)), randBytes(1024), false)
+		if resp.StatusCode != want {
+			t.Fatalf("quota upload %d: %d, want %d", i, resp.StatusCode, want)
+		}
 	}
 }

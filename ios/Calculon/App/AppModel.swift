@@ -51,6 +51,7 @@ final class AppModel {
     init() {
         vault = Vault(directory: Self.storageDirectory, deviceSecret: KeychainDeviceSecret())
         if !vault.isInitialized { setupStep = .choose }
+        TempFiles.removeAll() // decrypted copies left behind by a crash
         NotificationCenter.default.addObserver(
             forName: UIScreen.capturedDidChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
@@ -163,6 +164,7 @@ final class AppModel {
         if case .messenger(let session) = phase { session.stop() }
         phase = .planner
         draft = ""
+        TempFiles.removeAll()
     }
 
     /// Panic wipe: removes the account from the relay (best effort), then
@@ -172,6 +174,7 @@ final class AppModel {
         if case .messenger(let session) = phase { session.stop() }
         phase = .planner
         vault.destroy()
+        TempFiles.removeAll()
         draft = ""
         setupStep = .choose
     }

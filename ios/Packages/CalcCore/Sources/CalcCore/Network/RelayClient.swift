@@ -6,6 +6,8 @@ public enum RelayError: Error, Equatable {
     case notFound
     case conflict
     case mailboxFull
+    case tooLarge
+    case storageFull
     /// Network-level failure (no route, refused, TLS, local-network denied…).
     case transport(String)
 }
@@ -32,6 +34,10 @@ public protocol RelayTransport: Sendable {
     func send(_ envelope: Data, to id: String) async throws
     func fetch(auth: RelayAuth) async throws -> [RelayEnvelope]
     func ack(_ ids: [String], auth: RelayAuth) async throws
+    /// Attachments are unauthenticated: the random blob ID is the capability.
+    func uploadAttachment(_ blob: Data, id: String) async throws
+    func downloadAttachment(_ id: String) async throws -> Data
+    func deleteAttachment(_ id: String) async throws
 }
 
 public final class RelayClient: NSObject, RelayTransport, URLSessionDelegate, @unchecked Sendable {
@@ -88,9 +94,32 @@ public final class RelayClient: NSObject, RelayTransport, URLSessionDelegate, @u
         _ = try await call("POST", "/v1/messages/ack", body: try JSONEncoder().encode(["ids": ids]), auth: auth)
     }
 
-    private func call(_ method: String, _ path: String, body: Data = Data(), auth: RelayAuth? = nil) async throws -> Data {
+    public func uploadAttachment(_ blob: Data, id: String) async throws {
+        guard Self.isValidBlobID(id) else { throw RelayError.notFound }
+        _ = try await call("PUT", "/v1/attachments/\(id)", body: blob, timeout: Self.attachmentTimeout)
+    }
+
+    public func downloadAttachment(_ id: String) async throws -> Data {
+        guard Self.isValidBlobID(id) else { throw RelayError.notFound }
+        return try await call("GET", "/v1/attachments/\(id)", timeout: Self.attachmentTimeout)
+    }
+
+    public func deleteAttachment(_ id: String) async throws {
+        guard Self.isValidBlobID(id) else { throw RelayError.notFound }
+        _ = try await call("DELETE", "/v1/attachments/\(id)")
+    }
+
+    static let attachmentTimeout: TimeInterval = 15 * 60
+
+    public static func isValidBlobID(_ id: String) -> Bool {
+        id.count == 32 && id.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
+
+    private func call(_ method: String, _ path: String, body: Data = Data(), auth: RelayAuth? = nil,
+                      timeout: TimeInterval? = nil) async throws -> Data {
         var req = URLRequest(url: config.baseURL.appendingPathComponent(path))
         req.httpMethod = method
+        if let timeout { req.timeoutInterval = timeout }
         if !body.isEmpty {
             req.httpBody = body
             req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
@@ -110,7 +139,9 @@ public final class RelayClient: NSObject, RelayTransport, URLSessionDelegate, @u
         case 200..<300: return data
         case 404: throw RelayError.notFound
         case 409: throw RelayError.conflict
+        case 413: throw RelayError.tooLarge
         case 429: throw RelayError.mailboxFull
+        case 507: throw RelayError.storageFull
         default: throw RelayError.http(status)
         }
     }
