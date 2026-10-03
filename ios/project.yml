@@ -1,0 +1,69 @@
+name: Calculon
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+packages:
+  CalcCore:
+    path: Packages/CalcCore
+
+targets:
+  Calculon:
+    type: application
+    platform: iOS
+    sources:
+      - path: Calculon
+        excludes:
+          - "**/*.plist"
+          - "**/*.entitlements"
+    dependencies:
+      - package: CalcCore
+    entitlements:
+      path: Calculon/Calculon.entitlements
+      properties:
+        # Files are unreadable whenever the device is locked.
+        com.apple.developer.default-data-protection: NSFileProtectionComplete
+    info:
+      path: Calculon/Info.plist
+      properties:
+        CFBundleDisplayName: Калькулятор
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen:
+          UIColorName: ""
+          UIImageRespectsSafeAreaInsets: false
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIRequiresFullScreen: true
+        UIApplicationSupportsIndirectInputEvents: true
+        UIUserInterfaceStyle: Dark
+        NSCameraUsageDescription: Сканирование QR-кодов.
+        ITSAppUsesNonExemptEncryption: true
+        # Plain HTTP is allowed only to local-network hosts (dev relay on the
+        # LAN); everything on the internet still requires HTTPS.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: Подключение к серверу в локальной сети.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.shetami.calc
+        PRODUCT_NAME: Calculon
+        DEVELOPMENT_TEAM: 2GSF24F5A8
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        # LibSignalClient's public interface imports the SignalFfi C module.
+        SWIFT_INCLUDE_PATHS: $(inherited) $(PODS_ROOT)/LibSignalClient/swift/Sources/SignalFfi
+        ENABLE_BITCODE: NO
+        # Hardening
+        ENABLE_USER_SCRIPT_SANDBOXING: NO   # CocoaPods scripts need it off
+        SWIFT_COMPILATION_MODE: wholemodule
+        DEAD_CODE_STRIPPING: YES
+        STRIP_INSTALLED_PRODUCT: YES
+      configs:
+        Release:
+          SWIFT_OPTIMIZATION_LEVEL: -O
+          DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+          COPY_PHASE_STRIP: YES

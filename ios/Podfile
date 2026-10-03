@@ -1,0 +1,26 @@
+platform :ios, '17.0'
+use_frameworks!
+
+# libsignal ships prebuilt Rust FFI binaries for CocoaPods. The tag and the
+# matching checksum are pinned together in .libsignal-version (the same pair
+# Signal-iOS uses; `./bootstrap.sh --update-libsignal` refreshes it).
+pin = File.readlines(File.join(__dir__, '.libsignal-version')).to_h { |l| l.strip.split('=', 2) }
+LIBSIGNAL_TAG = pin.fetch('LIBSIGNAL_TAG')
+ENV['LIBSIGNAL_FFI_PREBUILD_CHECKSUM'] = pin.fetch('LIBSIGNAL_FFI_PREBUILD_CHECKSUM')
+
+target 'Calculon' do
+  pod 'LibSignalClient', git: 'https://github.com/signalapp/libsignal.git', tag: LIBSIGNAL_TAG
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |t|
+    t.build_configurations.each do |c|
+      c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '17.0'
+      # libsignal_ffi.a embeds BoringSSL (C++); with no other C++ pod in the
+      # app nothing else pulls in libc++, so link it explicitly.
+      if t.name == 'LibSignalClient'
+        c.build_settings['OTHER_LDFLAGS'] = '$(inherited) -lc++'
+      end
+    end
+  end
+end
