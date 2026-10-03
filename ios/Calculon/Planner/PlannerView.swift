@@ -37,6 +37,9 @@ struct PlannerView: View {
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { inputBar }
             .navigationTitle(title)
+            // Inline: a large title lives inside the list's scroll area and the
+            // top-inset week strip would cover it.
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if !calendar.isDateInToday(selectedDay) {
                     ToolbarItem(placement: .topBarTrailing) {
