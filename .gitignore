@@ -10,6 +10,8 @@ ios/Calculon.xcworkspace/
 ios/Pods/
 ios/Calculon/Info.plist
 ios/Calculon/Calculon.entitlements
+# Per-deployment relay address (template: ios/RelayEndpoint.example.swift)
+ios/Calculon/App/RelayEndpoint.swift
 
 # Server
 server/relay

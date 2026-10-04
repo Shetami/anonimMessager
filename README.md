@@ -39,7 +39,7 @@ go run ./cmd/relay -addr :8443 -db relay.db -tls-cert cert.pem -tls-key key.pem
 ### iOS
 
 1. Примите лицензию Xcode: `sudo xcodebuild -license`.
-2. Укажите адрес сервера и SPKI-пины в [ios/Calculon/App/AppConfig.swift](ios/Calculon/App/AppConfig.swift).
+2. Выполните `./bootstrap.sh` (шаг 3) один раз: он создаст `ios/Calculon/App/RelayEndpoint.swift` из [шаблона](ios/RelayEndpoint.example.swift). Укажите там адрес сервера и SPKI-пины. Этот файл не попадает в git.
 3. Выполните:
    ```sh
    cd ios

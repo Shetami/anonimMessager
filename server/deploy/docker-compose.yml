@@ -4,6 +4,10 @@
 #
 # Nothing logs: relay prints no requests, Caddy writes no access logs and
 # Docker keeps no container output (logging driver "none").
+#
+# Works with Docker and with Podman (`systemctl enable --now podman.socket`).
+# Bind mounts carry `z` so SELinux hosts (RHEL, Rocky, Alma, Fedora) relabel
+# them for container access; elsewhere the flag is ignored.
 
 x-nolog: &nolog
   logging:
@@ -16,18 +20,20 @@ services:
     restart: unless-stopped
     <<: *nolog
     command:
-      - -turn-secret-file=/run/secrets/turn_secret
+      - -turn-secret-file=/run/secrets/turn-secret
       - -turn-urls=turn:${PUBLIC_IP}:3478?transport=udp,turn:${PUBLIC_IP}:3478?transport=tcp
-    secrets: [turn_secret]
     volumes:
       - relay-data:/data
+      # A plain bind mount rather than compose `secrets:`, which can't take
+      # the SELinux label option.
+      - ./secrets/turn-secret:/run/secrets/turn-secret:ro,z
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     networks: [internal]
 
   caddy:
-    image: caddy:2-alpine
+    image: docker.io/library/caddy:2-alpine
     restart: unless-stopped
     <<: *nolog
     depends_on: [relay]
@@ -37,7 +43,7 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro,z
       - caddy-data:/data
       - caddy-config:/config
     networks: [internal]
@@ -45,17 +51,13 @@ services:
   # Host networking: coturn needs the real public IP and a large UDP port
   # range, which Docker's port mapping handles badly.
   coturn:
-    image: coturn/coturn:4
+    image: docker.io/coturn/coturn:4
     restart: unless-stopped
     <<: *nolog
     network_mode: host
     command: ["-c", "/etc/coturn/turnserver.conf"]
     volumes:
-      - ./secrets/turnserver.conf:/etc/coturn/turnserver.conf:ro
-
-secrets:
-  turn_secret:
-    file: ./secrets/turn-secret
+      - ./secrets/turnserver.conf:/etc/coturn/turnserver.conf:ro,z
 
 volumes:
   relay-data:

@@ -26,6 +26,12 @@ if [[ "${1:-}" == "--update-signal" || "${1:-}" == "--update-libsignal" ]]; then
   echo "Re-check Calculon/Crypto/SignalEngine.swift and Calculon/Calls/CallService.swift against the new APIs."
 fi
 
+# The relay address is per deployment and stays out of git.
+if [[ ! -f Calculon/App/RelayEndpoint.swift ]]; then
+  cp RelayEndpoint.example.swift Calculon/App/RelayEndpoint.swift
+  echo "Created Calculon/App/RelayEndpoint.swift — set your relay address there."
+fi
+
 xcodegen generate
 pod install
 echo "Done. Open Calculon.xcworkspace"
