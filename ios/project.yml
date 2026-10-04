@@ -28,7 +28,7 @@ targets:
     info:
       path: Calculon/Info.plist
       properties:
-        CFBundleDisplayName: Ежедневник
+        CFBundleDisplayName: ToDoDo
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
         UILaunchScreen:
@@ -54,6 +54,7 @@ targets:
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # LibSignalClient's public interface imports the SignalFfi C module.
         SWIFT_INCLUDE_PATHS: $(inherited) $(PODS_ROOT)/LibSignalClient/swift/Sources/SignalFfi
         ENABLE_BITCODE: NO

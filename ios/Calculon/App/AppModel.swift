@@ -115,8 +115,10 @@ final class AppModel {
                 setupStep = .choose
                 return
             }
+            var created = false
             do {
                 let result = try vault.setup(code: code)
+                created = true
                 // Create both databases now so the sibling slot's file exists
                 // whether or not a decoy code is ever set.
                 _ = try SecureDatabase(url: databaseURL(for: result.sibling), profile: result.sibling)
@@ -126,7 +128,11 @@ final class AppModel {
                 setupMessage = nil
                 enter(session)
             } catch {
-                setupMessage = "Ошибка: \(error.localizedDescription)"
+                // Roll back a half-finished setup: otherwise the vault file
+                // exists, every retry fails with alreadyInitialized and the
+                // code can't be used to unlock either.
+                if created { vault.destroy() }
+                setupMessage = "Ошибка: \(String(describing: error))"
                 setupStep = .choose
             }
         case nil:
