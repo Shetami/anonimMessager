@@ -1,0 +1,4 @@
+# Caddy writes no access logs unless told to: don't add a `log` directive.
+{$DOMAIN} {
+	reverse_proxy relay:8080
+}

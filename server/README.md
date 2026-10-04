@@ -57,7 +57,42 @@
 
 `/v1/turn` не требует аутентификации: иначе relay знал бы, какой ящик собирается звонить. Клиенты запрашивают учётные данные заранее, при фоновой синхронизации, а не в момент звонка, чтобы и время запроса ничего не выдавало. Обратная сторона: кто угодно может получить учётные данные и гонять трафик через ваш TURN. Квоты в `turnserver.conf` это ограничивают; при публичном запуске добавьте rate limit на прокси перед `/v1/turn`.
 
-## Развёртывание
+## Развёртывание в Docker (рекомендуется)
+
+[deploy/docker-compose.yml](deploy/docker-compose.yml) поднимает всю серверную часть: relay, Caddy (HTTPS с сертификатом Let's Encrypt) и coturn (звонки).
+
+Нужно:
+- сервер с **публичным IPv4**. RingRTC отбрасывает relay-кандидатов с частными адресами (192.168.x, 10.x и т.п.), поэтому TURN в локальной сети или за NAT без проброса портов работать не будет;
+- домен (или поддомен), A-запись которого указывает на этот IP;
+- открытые порты: TCP 80 и 443 (HTTPS и выпуск сертификата), TCP и UDP 3478 (TURN), UDP 49160–49999 (медиа).
+
+```sh
+git clone --filter=blob:none --sparse https://github.com/Shetami/anonimMessager.git
+cd anonimMessager && git sparse-checkout set server
+cd server/deploy
+./init.sh relay.example.com          # публичный IP определится сам; можно передать вторым аргументом
+docker compose up -d --build
+```
+
+`init.sh` создаёт `.env`, общий секрет TURN и конфиг coturn в `secrets/`. Всё это не попадает в git. Повторный запуск секрет не меняет.
+
+После запуска укажите в [AppConfig.swift](../ios/Calculon/App/AppConfig.swift) `https://relay.example.com` и SPKI-пины. Caddy генерирует новый ключ при каждом продлении сертификата, поэтому пиньте не ключ сервера, а корневые сертификаты Let's Encrypt (ISRG Root X1 и X2). Это по-прежнему отсекает сертификаты, выпущенные любым другим CA:
+
+```sh
+for r in isrgrootx1 isrg-root-x2; do
+  curl -fsS https://letsencrypt.org/certs/$r.pem | openssl x509 -pubkey -noout \
+    | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64
+done
+```
+
+Обновление: `git pull && docker compose up -d --build`. Данные (база и вложения) лежат в volume `relay-data` и переживают пересборку.
+
+Свойства контейнеров:
+- relay собирается в distroless-образ (~16 МБ, без shell), работает не от root, с read-only файловой системой и без capabilities;
+- логирование Docker отключено у всех сервисов (`logging: driver: none`), Caddy не пишет access-логи, coturn пишет в `/dev/null`;
+- coturn работает в `network_mode: host`: ему нужен настоящий внешний IP и большой диапазон UDP-портов.
+
+## Развёртывание без Docker
 
 Вариант со встроенным TLS:
 

@@ -1,0 +1,66 @@
+# Whole server side: relay + TLS (Caddy) + TURN (coturn).
+#   ./init.sh relay.example.com     # once: secrets, .env, coturn config
+#   docker compose up -d --build
+#
+# Nothing logs: relay prints no requests, Caddy writes no access logs and
+# Docker keeps no container output (logging driver "none").
+
+x-nolog: &nolog
+  logging:
+    driver: none
+
+services:
+  relay:
+    build: ..
+    image: calc-relay
+    restart: unless-stopped
+    <<: *nolog
+    command:
+      - -turn-secret-file=/run/secrets/turn_secret
+      - -turn-urls=turn:${PUBLIC_IP}:3478?transport=udp,turn:${PUBLIC_IP}:3478?transport=tcp
+    secrets: [turn_secret]
+    volumes:
+      - relay-data:/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [internal]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    <<: *nolog
+    depends_on: [relay]
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [internal]
+
+  # Host networking: coturn needs the real public IP and a large UDP port
+  # range, which Docker's port mapping handles badly.
+  coturn:
+    image: coturn/coturn:4
+    restart: unless-stopped
+    <<: *nolog
+    network_mode: host
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./secrets/turnserver.conf:/etc/coturn/turnserver.conf:ro
+
+secrets:
+  turn_secret:
+    file: ./secrets/turn-secret
+
+volumes:
+  relay-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  internal:
