@@ -119,6 +119,8 @@ struct ContactInfoView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var confirmDelete = false
+    @State private var confirmClear = false
+    @State private var clearError: String?
 
     var body: some View {
         NavigationStack {
@@ -133,12 +135,12 @@ struct ContactInfoView: View {
                             get: { c.disappearAfter },
                             set: { v in Task { try? await service.setDisappearing(v, for: contactID) } }
                         )) {
-                            ForEach(DisappearOption.values, id: \.self) { v in
-                                Text(DisappearOption.label(v)).tag(v)
+                            ForEach(DisappearTimer.options, id: \.self) { v in
+                                Text(DisappearTimer.label(v)).tag(v)
                             }
                         }
                     } footer: {
-                        Text("Таймер применяется у обоих собеседников.")
+                        Text("Таймер применяется у обоих собеседников. Ваши сообщения исчезают через это время после отправки, входящие — после прочтения.")
                     }
                     Section {
                         LabeledContent("ID") {
@@ -149,6 +151,7 @@ struct ContactInfoView: View {
                         Text("Если вы не сканировали QR-код при встрече, сверьте ID голосом или лично.")
                     }
                     Section {
+                        Button("Очистить переписку", role: .destructive) { confirmClear = true }
                         Button("Удалить чат и контакт", role: .destructive) { confirmDelete = true }
                     }
                 }
@@ -164,12 +167,31 @@ struct ContactInfoView: View {
                     }
                 }
             }
+            .confirmationDialog("Очистить переписку без возможности восстановления? Контакт останется.",
+                                isPresented: $confirmClear, titleVisibility: .visible) {
+                Button("Только у меня", role: .destructive) { clear(forEveryone: false) }
+                Button("У меня и у собеседника", role: .destructive) { clear(forEveryone: true) }
+            }
+            .alert("Не удалено", isPresented: .constant(clearError != nil)) {
+                Button("OK") { clearError = nil }
+            } message: { Text(clearError ?? "") }
             .confirmationDialog("Удалить переписку без возможности восстановления?", isPresented: $confirmDelete,
                                 titleVisibility: .visible) {
                 Button("Удалить", role: .destructive) {
                     try? service.deleteContact(contactID)
                     dismiss()
                 }
+            }
+        }
+    }
+
+    private func clear(forEveryone: Bool) {
+        Task {
+            do {
+                try await service.clearChat(contactID, forEveryone: forEveryone)
+                dismiss()
+            } catch {
+                clearError = "Не удалось отправить собеседнику запрос на очистку. Проверьте соединение с сервером."
             }
         }
     }

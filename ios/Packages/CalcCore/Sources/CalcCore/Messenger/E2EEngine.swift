@@ -81,6 +81,43 @@ public struct ChatMessage: Codable, Identifiable, Hashable, Sendable {
     public var attachments: [AttachmentPointer]? = nil
     /// Set for call-log entries (body is empty).
     public var call: CallInfo? = nil
+    /// Disappearing timer of an incoming message. It starts when the message
+    /// is read, which is when `expiresAt` gets set.
+    public var expiresIn: TimeInterval? = nil
+    /// Set for "timer changed" notices (body is empty).
+    public var timerChange: TimerChange? = nil
+}
+
+/// A chat notice that someone changed the disappearing-messages timer.
+public struct TimerChange: Codable, Hashable, Sendable {
+    /// The new timer in seconds (nil = off).
+    public var seconds: TimeInterval?
+
+    public init(seconds: TimeInterval?) { self.seconds = seconds }
+
+    public func label(outgoing: Bool) -> String {
+        let who = outgoing ? "Вы" : "Собеседник"
+        let ending = outgoing ? "и" : ""
+        guard let seconds else { return "\(who) выключил\(ending) исчезающие сообщения" }
+        return "\(who) включил\(ending) исчезающие сообщения: \(DisappearTimer.label(seconds))"
+    }
+}
+
+/// Timer values offered for disappearing messages.
+public enum DisappearTimer {
+    public static let options: [TimeInterval?] = [nil, 30, 300, 3600, 86400, 604800]
+
+    public static func label(_ t: TimeInterval?) -> String {
+        switch t {
+        case nil: return "Выкл."
+        case 30?: return "30 с"
+        case 300?: return "5 мин"
+        case 3600?: return "1 ч"
+        case 86400?: return "1 д"
+        case 604800?: return "1 нед"
+        case let s?: return "\(Int(s)) с"
+        }
+    }
 }
 
 /// Everything needed to fetch and decrypt one attachment from the relay.
@@ -125,14 +162,20 @@ public struct OutgoingAttachment: Sendable {
 /// Plaintext inside the Signal message. Timestamps and everything else about
 /// the message are only ever visible end-to-end.
 public struct MessagePayload: Codable, Sendable {
-    public enum Kind: String, Codable, Sendable { case text, timer, delivered, read, call }
+    public enum Kind: String, Codable, Sendable {
+        case text, timer, delivered, read, call
+        /// The sender deleted the messages in `ids` (their own) for everyone.
+        case delete
+        /// The sender cleared the whole chat for both sides.
+        case clear
+    }
 
     public var kind: Kind
     public var id: String
     public var body: String
     public var sentAt: Date
     public var disappearAfter: TimeInterval?
-    /// Message IDs a delivered/read receipt refers to.
+    /// Message IDs a delivered/read receipt or a delete refers to.
     public var ids: [String]? = nil
     public var attachments: [AttachmentPointer]? = nil
     public var call: CallSignal? = nil

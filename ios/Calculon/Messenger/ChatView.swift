@@ -18,6 +18,7 @@ struct ChatView: View {
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var viewing: AttachmentPointer?
     @State private var previewURL: URL?
+    @State private var deleteError: String?
 
     private var contact: Contact? { service.contact(contactID) }
 
@@ -29,11 +30,17 @@ struct ChatView: View {
                         RequestBanner(contact: c)
                     }
                     ForEach(messages) { m in
-                        if let info = m.call {
-                            CallLogRow(message: m, info: info).id(m.id)
-                        } else {
-                            Bubble(message: m, open: open).id(m.id)
+                        Group {
+                            if let info = m.call {
+                                CallLogRow(message: m, info: info)
+                            } else if let change = m.timerChange {
+                                TimerNoticeRow(message: m, change: change)
+                            } else {
+                                Bubble(message: m, open: open)
+                            }
                         }
+                        .id(m.id)
+                        .contextMenu { deleteMenu(m) }
                     }
                 }
                 .padding(.horizontal, 12)
@@ -62,7 +69,7 @@ struct ChatView: View {
                 }
                 Button { showInfo = true } label: {
                     if let t = contact?.disappearAfter {
-                        Label(DisappearOption.label(t), systemImage: "timer")
+                        Label(DisappearTimer.label(t), systemImage: "timer")
                     } else {
                         Image(systemName: "info.circle")
                     }
@@ -104,6 +111,32 @@ struct ChatView: View {
         .alert("Не отправлено", isPresented: .constant(sendError != nil)) {
             Button("OK") { sendError = nil }
         } message: { Text(sendError ?? "") }
+        .alert("Не удалено", isPresented: .constant(deleteError != nil)) {
+            Button("OK") { deleteError = nil }
+        } message: { Text(deleteError ?? "") }
+    }
+
+    @ViewBuilder private func deleteMenu(_ m: ChatMessage) -> some View {
+        if !m.body.isEmpty {
+            Button("Скопировать", systemImage: "doc.on.doc") { SecurePasteboard.copy(m.body) }
+        }
+        Button("Удалить у меня", systemImage: "trash", role: .destructive) {
+            service.deleteMessages([m.id], in: contactID)
+            messages = service.messages(with: contactID)
+        }
+        // Only your own messages; call log and notices are local anyway.
+        if m.outgoing, m.call == nil, m.timerChange == nil {
+            Button("Удалить у всех", systemImage: "trash.fill", role: .destructive) {
+                Task {
+                    do {
+                        try await service.deleteForEveryone([m.id], in: contactID)
+                    } catch {
+                        deleteError = "Не удалось отправить собеседнику запрос на удаление. Проверьте соединение с сервером."
+                    }
+                    messages = service.messages(with: contactID)
+                }
+            }
+        }
     }
 
     private var canSend: Bool {
@@ -222,9 +255,6 @@ struct Bubble: View {
                         .background(message.outgoing ? Color.orange : Color(white: 0.2),
                                     in: RoundedRectangle(cornerRadius: 16))
                         .foregroundStyle(message.outgoing ? .black : .white)
-                        .contextMenu {
-                            Button("Скопировать", systemImage: "doc.on.doc") { SecurePasteboard.copy(message.body) }
-                        }
                 }
                 HStack(spacing: 4) {
                     if message.expiresAt != nil { Image(systemName: "timer") }
@@ -257,6 +287,22 @@ struct Bubble: View {
     }
 }
 
+struct TimerNoticeRow: View {
+    let message: ChatMessage
+    let change: TimerChange
+
+    var body: some View {
+        Label(change.label(outgoing: message.outgoing), systemImage: "timer")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color(white: 0.12), in: Capsule())
+            .frame(maxWidth: .infinity)
+    }
+}
+
 struct RequestBanner: View {
     let contact: Contact
     @Environment(MessengerService.self) private var service
@@ -275,22 +321,6 @@ struct RequestBanner: View {
         }
         .padding()
         .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 12))
-    }
-}
-
-enum DisappearOption {
-    static let values: [TimeInterval?] = [nil, 30, 300, 3600, 86400, 604800]
-
-    static func label(_ t: TimeInterval?) -> String {
-        switch t {
-        case nil: return "Выкл."
-        case 30?: return "30 с"
-        case 300?: return "5 мин"
-        case 3600?: return "1 ч"
-        case 86400?: return "1 д"
-        case 604800?: return "1 нед"
-        case let s?: return "\(Int(s)) с"
-        }
     }
 }
 

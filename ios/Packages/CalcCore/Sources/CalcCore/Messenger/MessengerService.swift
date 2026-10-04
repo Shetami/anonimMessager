@@ -38,6 +38,12 @@ public final class MessengerService {
     @ObservationIgnored private var sealing: Curve25519.KeyAgreement.PrivateKey?
     @ObservationIgnored private var lastMaintenance: Date?
     @ObservationIgnored private var turn: (credentials: TurnCredentials, expires: Date)?
+    /// Wakes up to delete messages when the earliest timer runs out.
+    @ObservationIgnored private var expiryTask: Task<Void, Never>?
+    @ObservationIgnored private var nextExpiry: Date?
+    /// Attachments of deleted messages, so a download still in flight doesn't
+    /// leave an orphan file behind.
+    @ObservationIgnored private var removedAttachments: Set<String> = []
 
     /// Call signaling from accepted contacts, in the order it was sent.
     /// Message requests and strangers can't ring this device. `age` is how
@@ -70,6 +76,9 @@ public final class MessengerService {
         self.engine = engine
         self.relay = relay
         load()
+        // Whatever ran out while the profile was locked goes before anything
+        // can show it.
+        purgeExpired()
     }
 
     private func load() {
@@ -194,14 +203,21 @@ public final class MessengerService {
         reloadContacts()
     }
 
-    /// Clears the unread badge and sends a read receipt for every incoming
-    /// message not reported yet. Messages stay `.received` if the receipt
-    /// can't be sent, so the next call retries.
+    /// Clears the unread badge, starts the disappearing timers of incoming
+    /// messages and sends a read receipt for every incoming message not
+    /// reported yet. Messages stay `.received` if the receipt can't be sent,
+    /// so the next call retries.
     public func markRead(_ id: String) async {
         guard var c = contact(id) else { return }
         if c.unread > 0 {
             c.unread = 0
             try? saveContact(c)
+        }
+        let now = Date()
+        for var m in messages(with: id) where !m.outgoing && m.expiresAt == nil {
+            guard let t = m.expiresIn else { continue }
+            m.expiresAt = now.addingTimeInterval(t)
+            try? saveMessage(m, preview: nil)
         }
         let pending = messages(with: id).filter { !$0.outgoing && $0.status == .received }
         guard !pending.isEmpty else { return }
@@ -210,9 +226,9 @@ public final class MessengerService {
         } catch {
             return
         }
-        for var m in pending {
-            m.status = .read
-            try? saveMessage(m, preview: nil)
+        // Re-read: a message may have been deleted while we were awaiting.
+        for p in pending {
+            updateMessage(p.id) { $0.status = .read }
         }
     }
 
@@ -250,18 +266,17 @@ public final class MessengerService {
             try await deliver(MessagePayload(kind: .text, id: msg.id, body: text, sentAt: now,
                                              disappearAfter: c.disappearAfter,
                                              attachments: pointers.isEmpty ? nil : pointers), to: c)
-            // A receipt may already have upgraded it while we were awaiting.
-            if let stored = try? db.get(ChatMessage.self, collection: C.messages, key: msg.id),
-               stored.status != .sending {
-                return stored
-            }
+            // A receipt may already have upgraded it while we were awaiting,
+            // or the user may have deleted it.
+            guard let stored = try? db.get(ChatMessage.self, collection: C.messages, key: msg.id) else { return msg }
+            if stored.status != .sending { return stored }
             msg.status = .sent
         } catch {
             msg.status = .failed
-            try? saveMessage(msg, preview: nil)
+            updateMessage(msg.id) { $0.status = .failed }
             throw error
         }
-        try saveMessage(msg, preview: nil)
+        updateMessage(msg.id) { $0.status = .sent }
         return msg
     }
 
@@ -279,6 +294,12 @@ public final class MessengerService {
     }
 
     /// Text shown in the chat list for a message.
+    static func preview(of m: ChatMessage) -> String {
+        if let call = m.call { return "📞 " + call.label(outgoing: m.outgoing) }
+        if let t = m.timerChange { return "⏱ " + t.label(outgoing: m.outgoing) }
+        return preview(m.body, m.attachments ?? [])
+    }
+
     static func preview(_ text: String, _ attachments: [AttachmentPointer]) -> String {
         guard text.isEmpty, let first = attachments.first else { return text }
         let label = first.isImage ? "Фото" : first.isVideo ? "Видео" : first.name
@@ -325,6 +346,7 @@ public final class MessengerService {
                 guard plain.count == p.size else { throw AttachmentCipherError.malformed }
                 try files.write(blob, id: p.id)
             }.value
+            if removedAttachments.contains(p.id) { files.delete(p.id) }
             try? await relay.deleteAttachment(p.id)
         } catch {
             failedDownloads.insert(p.id)
@@ -340,15 +362,106 @@ public final class MessengerService {
     }
 
     private func deleteFiles(of m: ChatMessage) {
-        for p in m.attachments ?? [] { files.delete(p.id) }
+        for p in m.attachments ?? [] {
+            files.delete(p.id)
+            removedAttachments.insert(p.id)
+        }
     }
+
+    // MARK: - Disappearing messages and deletion
 
     /// Sets the disappearing-messages timer for a chat and tells the peer.
     public func setDisappearing(_ seconds: TimeInterval?, for contactID: String) async throws {
         guard var c = contact(contactID) else { throw MessengerError.unknownContact }
+        guard c.disappearAfter != seconds else { return }
         c.disappearAfter = seconds
         try saveContact(c)
+        recordTimerChange(seconds, in: c.id, outgoing: true)
         try await deliver(MessagePayload(kind: .timer, id: UUID().uuidString, body: "", sentAt: Date(), disappearAfter: seconds), to: c)
+    }
+
+    /// Adds a notice about a timer change to the chat. Notices don't
+    /// disappear themselves, so a silent change can't go unnoticed.
+    private func recordTimerChange(_ seconds: TimeInterval?, in contactID: String, outgoing: Bool, at date: Date = Date()) {
+        let msg = ChatMessage(
+            id: UUID().uuidString, contactID: contactID, outgoing: outgoing, body: "", sentAt: date,
+            // Never .received: that would send a read receipt for it.
+            status: outgoing ? .sent : .read, expiresAt: nil, timerChange: TimerChange(seconds: seconds))
+        try? saveMessage(msg, preview: Self.preview(of: msg))
+    }
+
+    /// Deletes messages on this device only.
+    public func deleteMessages(_ ids: [String], in contactID: String) {
+        let doomed = ids.compactMap { try? db.get(ChatMessage.self, collection: C.messages, key: $0) }
+            .filter { $0.contactID == contactID }
+        // Nobody will fetch attachments of an incoming message we deleted
+        // before downloading them.
+        let blobs = doomed.filter { !$0.outgoing }.flatMap { $0.attachments ?? [] }.filter { !files.contains($0.id) }
+        remove(doomed)
+        deleteBlobs(blobs)
+    }
+
+    /// Deletes our own messages here and on the peer's device. Nothing is
+    /// deleted if the request can't be sent.
+    public func deleteForEveryone(_ ids: [String], in contactID: String) async throws {
+        guard let c = contact(contactID) else { throw MessengerError.unknownContact }
+        let doomed = ids.compactMap { try? db.get(ChatMessage.self, collection: C.messages, key: $0) }
+            .filter { $0.contactID == contactID && $0.outgoing && $0.call == nil && $0.timerChange == nil }
+        guard !doomed.isEmpty else { return }
+        try await deliver(MessagePayload(kind: .delete, id: UUID().uuidString, body: "", sentAt: Date(),
+                                         disappearAfter: c.disappearAfter, ids: doomed.map(\.id)), to: c)
+        remove(doomed)
+        // The peer may not have downloaded them yet; they no longer need to.
+        deleteBlobs(doomed.flatMap { $0.attachments ?? [] })
+    }
+
+    /// Deletes the whole conversation but keeps the contact. With
+    /// `forEveryone` the peer's copy is cleared too (nothing is deleted if
+    /// that request can't be sent).
+    public func clearChat(_ contactID: String, forEveryone: Bool) async throws {
+        guard let c = contact(contactID) else { throw MessengerError.unknownContact }
+        if forEveryone {
+            try await deliver(MessagePayload(kind: .clear, id: UUID().uuidString, body: "", sentAt: Date(),
+                                             disappearAfter: c.disappearAfter), to: c)
+        }
+        let all = (try? db.list(ChatMessage.self, collection: C.messages, group: contactID)) ?? []
+        let blobs = all.flatMap { m in (m.attachments ?? []).filter { forEveryone || (!m.outgoing && !files.contains($0.id)) } }
+        remove(all)
+        deleteBlobs(blobs)
+    }
+
+    /// Applies a peer's delete or clear request. A peer can only delete their
+    /// own messages, except when clearing the whole chat.
+    private func applyDeletion(_ payload: MessagePayload, from c: Contact) {
+        let all = (try? db.list(ChatMessage.self, collection: C.messages, group: c.id)) ?? []
+        if payload.kind == .clear {
+            remove(all)
+        } else {
+            let ids = Set(payload.ids ?? [])
+            remove(all.filter { ids.contains($0.id) && !$0.outgoing && $0.call == nil && $0.timerChange == nil })
+        }
+    }
+
+    private func deleteBlobs(_ pointers: [AttachmentPointer]) {
+        guard !pointers.isEmpty else { return }
+        Task { for p in pointers { try? await relay.deleteAttachment(p.id) } }
+    }
+
+    /// Deletes messages and their files, then fixes up the chat-list preview
+    /// and unread count so no trace of them is left in the contact either.
+    private func remove(_ doomed: [ChatMessage]) {
+        guard !doomed.isEmpty else { return }
+        for m in doomed {
+            deleteFiles(of: m)
+            try? db.delete(collection: C.messages, key: m.id)
+        }
+        for contactID in Set(doomed.map(\.contactID)) {
+            guard var c = contact(contactID) else { continue }
+            let unread = doomed.filter { $0.contactID == contactID && !$0.outgoing && $0.status == .received }.count
+            c.unread = max(0, c.unread - unread)
+            c.lastPreview = messages(with: contactID).last.map(Self.preview(of:))
+            try? saveContact(c)
+        }
     }
 
     private func sendReceipt(_ kind: MessagePayload.Kind, ids: [String], to c: Contact) async throws {
@@ -396,6 +509,8 @@ public final class MessengerService {
             for (contactID, ids) in delivered {
                 if let c = contact(contactID) { try? await sendReceipt(.delivered, ids: ids, to: c) }
             }
+            // Skip messages a later envelope in the same sync deleted.
+            toDownload.removeAll { removedAttachments.contains($0.id) }
             if !toDownload.isEmpty {
                 // One at a time keeps memory bounded for large files.
                 Task { for p in toDownload { await self.download(p) } }
@@ -433,6 +548,10 @@ public final class MessengerService {
             }
             return nil
         }
+        if payload.kind == .delete || payload.kind == .clear {
+            if let c = contact(content.sender) { applyDeletion(payload, from: c) }
+            return nil
+        }
 
         var c: Contact
         if let existing = contact(content.sender) {
@@ -445,32 +564,42 @@ public final class MessengerService {
             c = Contact(
                 id: content.sender, name: AccountID.grouped(content.sender).prefix(9).description,
                 identityKey: bundle.identityKey, sealingKey: bundle.sealingKey.publicKey,
-                addedAt: Date(), verified: false, isRequest: true, disappearAfter: payload.disappearAfter,
+                // Timer off until the payload sets it, so the chat shows a notice.
+                addedAt: Date(), verified: false, isRequest: true, disappearAfter: nil,
                 lastActivity: Date(), lastPreview: nil, unread: 0)
         }
 
+        let timerChanged = c.disappearAfter != payload.disappearAfter
         switch payload.kind {
         case .timer:
             c.disappearAfter = payload.disappearAfter
             try saveContact(c)
+            if timerChanged {
+                recordTimerChange(payload.disappearAfter, in: c.id, outgoing: false, at: min(payload.sentAt, Date()))
+            }
             return nil
-        case .delivered, .read, .call:
+        case .delivered, .read, .call, .delete, .clear:
             return nil
         case .text:
             // Message IDs are chosen by the sender: never let one replace a
             // message we already have (a duplicate delivery or a forgery).
             if (try? db.get(ChatMessage.self, collection: C.messages, key: payload.id)) != nil { return nil }
             let attachments = acceptedAttachments(payload.attachments)
-            if c.disappearAfter != payload.disappearAfter { c.disappearAfter = payload.disappearAfter }
+            c.disappearAfter = payload.disappearAfter
             c.unread += 1
             try saveContact(c)
             let now = Date()
+            let sentAt = min(payload.sentAt, now)
+            if timerChanged {
+                // Just before the message, so it reads in the right order.
+                recordTimerChange(payload.disappearAfter, in: c.id, outgoing: false, at: sentAt.addingTimeInterval(-0.001))
+            }
+            // The timer starts once the message is read (see markRead).
             let msg = ChatMessage(
                 id: payload.id, contactID: c.id, outgoing: false, body: payload.body,
-                sentAt: min(payload.sentAt, now), status: .received,
-                expiresAt: payload.disappearAfter.map { now.addingTimeInterval($0) },
-                attachments: attachments.isEmpty ? nil : attachments)
-            try saveMessage(msg, preview: Self.preview(payload.body, attachments))
+                sentAt: sentAt, status: .received, expiresAt: nil,
+                attachments: attachments.isEmpty ? nil : attachments, expiresIn: payload.disappearAfter)
+            try saveMessage(msg, preview: Self.preview(of: msg))
             return msg
         }
     }
@@ -516,14 +645,37 @@ public final class MessengerService {
         try saveState(s)
     }
 
+    /// Deletes messages whose timer ran out and schedules the next run for
+    /// the earliest timer still going.
     public func purgeExpired() {
         let now = Date()
+        var expired: [ChatMessage] = []
+        var next: Date?
         for c in contacts {
-            let all = (try? db.list(ChatMessage.self, collection: C.messages, group: c.id)) ?? []
-            for m in all where (m.expiresAt.map { $0 <= now } ?? false) {
-                deleteFiles(of: m)
-                try? db.delete(collection: C.messages, key: m.id)
+            for m in (try? db.list(ChatMessage.self, collection: C.messages, group: c.id)) ?? [] {
+                guard let at = m.expiresAt else { continue }
+                if at <= now {
+                    expired.append(m)
+                } else {
+                    next = min(next ?? at, at)
+                }
             }
+        }
+        remove(expired)
+        nextExpiry = nil
+        expiryTask?.cancel()
+        expiryTask = nil
+        if let next { scheduleExpiry(next) }
+    }
+
+    private func scheduleExpiry(_ date: Date) {
+        guard nextExpiry.map({ date < $0 }) ?? true else { return }
+        nextExpiry = date
+        expiryTask?.cancel()
+        expiryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(0, date.timeIntervalSinceNow) + 0.05))
+            guard !Task.isCancelled else { return }
+            self?.purgeExpired()
         }
     }
 
@@ -554,7 +706,7 @@ public final class MessengerService {
             // Never .received: that would send a read receipt for it.
             status: outgoing ? .sent : .read,
             expiresAt: c.disappearAfter.map { Date().addingTimeInterval($0) }, call: info)
-        try? saveMessage(msg, preview: "📞 " + info.label(outgoing: outgoing))
+        try? saveMessage(msg, preview: Self.preview(of: msg))
         if !outgoing, info.outcome == .missed, var c = contact(contactID) {
             c.unread += 1
             try? saveContact(c)
@@ -595,11 +747,19 @@ public final class MessengerService {
     private func saveMessage(_ m: ChatMessage, preview: String?) throws {
         try db.put(m, collection: C.messages, key: m.id, group: m.contactID,
                    sort: Int64(m.sentAt.timeIntervalSince1970 * 1000))
+        if let at = m.expiresAt { scheduleExpiry(at) }
         if let preview, var c = contact(m.contactID) {
             c.lastActivity = Date()
             c.lastPreview = preview
             try saveContact(c)
         }
+    }
+
+    /// Changes a stored message, unless it has been deleted in the meantime.
+    private func updateMessage(_ id: String, _ change: (inout ChatMessage) -> Void) {
+        guard var m = try? db.get(ChatMessage.self, collection: C.messages, key: id) else { return }
+        change(&m)
+        try? saveMessage(m, preview: nil)
     }
 
     private func reloadContacts() {

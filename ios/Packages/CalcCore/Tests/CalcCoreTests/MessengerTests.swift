@@ -212,19 +212,123 @@ struct MessengerTests {
         }
     }
 
-    @Test func disappearingMessages() async throws {
+    func pair() async throws -> (FakeRelay, MessengerService, MessengerService) {
         let relay = FakeRelay()
         let alice = try makeService(relay)
         let bob = try makeService(relay)
         try await alice.register()
         try await bob.register()
         try await alice.addContact(id: bob.accountID!, name: "Bob", verifiedInPerson: false)
-        try await alice.setDisappearing(0.01, for: bob.accountID!)
+        return (relay, alice, bob)
+    }
+
+    /// Chat content without the timer notices.
+    func bodies(_ s: MessengerService, _ id: String) -> [String] {
+        s.messages(with: id).filter { $0.timerChange == nil }.map(\.body)
+    }
+
+    @Test func disappearingMessages() async throws {
+        let (_, alice, bob) = try await pair()
+        try await alice.setDisappearing(0.2, for: bob.accountID!)
         try await alice.send("gone soon", to: bob.accountID!)
         await bob.sync()
-        #expect(bob.contacts.first?.disappearAfter == 0.01)
+        #expect(bob.contacts.first?.disappearAfter == 0.2)
+
+        // Both sides see who changed the timer.
+        #expect(alice.messages(with: bob.accountID!).compactMap(\.timerChange) == [TimerChange(seconds: 0.2)])
+        let notice = try #require(bob.messages(with: alice.accountID!).first)
+        #expect(notice.timerChange == TimerChange(seconds: 0.2) && !notice.outgoing)
+
+        // The recipient's timer only starts once the message is read.
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(bodies(alice, bob.accountID!).isEmpty)
+        #expect(bodies(bob, alice.accountID!) == ["gone soon"])
+        await bob.markRead(alice.accountID!)
+        try await Task.sleep(for: .milliseconds(400))
+        #expect(bodies(bob, alice.accountID!).isEmpty)
+
+        // Gone from the database and the chat-list preview, without a sync.
+        for (s, peer) in [(alice, bob.accountID!), (bob, alice.accountID!)] {
+            let stored = try s.db.list(ChatMessage.self, collection: "messages", group: peer)
+            #expect(stored.allSatisfy { $0.timerChange != nil })
+            #expect(s.contact(peer)?.lastPreview?.contains("gone soon") != true)
+        }
+    }
+
+    @Test func timerNoticeOnImplicitChange() async throws {
+        let (_, alice, bob) = try await pair()
+        try await alice.send("hi", to: bob.accountID!)
+        await bob.sync()
+        // Bob never got the .timer message, only a text carrying the new timer.
+        try await bob.setDisappearing(3600, for: alice.accountID!)
+        _ = try await alice.sync()
+        #expect(alice.contact(bob.accountID!)?.disappearAfter == 3600)
+        #expect(alice.contact(bob.accountID!)?.lastPreview == "⏱ Собеседник включил исчезающие сообщения: 1 ч")
+        // Setting the same value again adds nothing.
+        try await alice.setDisappearing(3600, for: bob.accountID!)
+        #expect(alice.messages(with: bob.accountID!).compactMap(\.timerChange).count == 1)
+    }
+
+    @Test func deleteForEveryone() async throws {
+        let (relay, alice, bob) = try await pair()
+        try await alice.send("keep", to: bob.accountID!)
+        let oops = try await alice.send("oops", attachments: [
+            OutgoingAttachment(data: Data("x".utf8), name: "x.txt", mime: "text/plain"),
+        ], to: bob.accountID!)
+        try await alice.deleteForEveryone([oops.id], in: bob.accountID!)
+        #expect(bodies(alice, bob.accountID!) == ["keep"])
+        #expect(alice.contact(bob.accountID!)?.lastPreview == "keep")
         try await Task.sleep(for: .milliseconds(50))
-        #expect(bob.messages(with: alice.accountID!).isEmpty)
+        #expect(relay.blobs.isEmpty) // never downloaded, so removed by the sender
+
+        // Message and deletion arrive in the same sync.
+        await bob.sync()
+        #expect(bodies(bob, alice.accountID!) == ["keep"])
+        #expect(bob.contact(alice.accountID!)?.unread == 1)
+        #expect(bob.contact(alice.accountID!)?.lastPreview == "keep")
+    }
+
+    @Test func deleteLocallyOnly() async throws {
+        let (_, alice, bob) = try await pair()
+        let m = try await alice.send("hi", to: bob.accountID!)
+        alice.deleteMessages([m.id], in: bob.accountID!)
         #expect(alice.messages(with: bob.accountID!).isEmpty)
+        #expect(alice.contact(bob.accountID!)?.lastPreview == nil)
+        await bob.sync()
+        #expect(bodies(bob, alice.accountID!) == ["hi"])
+    }
+
+    @Test func clearChat() async throws {
+        let (_, alice, bob) = try await pair()
+        try await alice.send("one", to: bob.accountID!)
+        await bob.sync()
+        try await bob.send("two", to: alice.accountID!)
+        await alice.sync()
+
+        try await bob.clearChat(alice.accountID!, forEveryone: true)
+        #expect(bob.messages(with: alice.accountID!).isEmpty)
+        await alice.sync()
+        #expect(alice.messages(with: bob.accountID!).isEmpty)
+        #expect(alice.contact(bob.accountID!)?.lastPreview == nil)
+        #expect(alice.contacts.count == 1) // the contact stays
+
+        try await alice.send("three", to: bob.accountID!)
+        try await alice.clearChat(bob.accountID!, forEveryone: false)
+        #expect(alice.messages(with: bob.accountID!).isEmpty)
+        await bob.sync()
+        #expect(bodies(bob, alice.accountID!) == ["three"])
+    }
+
+    @Test func strangersCannotDelete() async throws {
+        let (relay, alice, bob) = try await pair()
+        try await alice.send("hi", to: bob.accountID!)
+        await bob.sync()
+        let mallory = try makeService(relay)
+        try await mallory.register()
+        try await mallory.addContact(id: bob.accountID!, name: "Bob", verifiedInPerson: false)
+        try await mallory.clearChat(bob.accountID!, forEveryone: true)
+        await bob.sync()
+        #expect(bob.contacts.map(\.id) == [alice.accountID!]) // no request created either
+        #expect(bodies(bob, alice.accountID!) == ["hi"])
     }
 }
