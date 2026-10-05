@@ -133,7 +133,7 @@ private struct TaskRow: View {
             Button("На завтра", systemImage: "arrow.turn.up.right") {
                 withAnimation { model.planner.move(task.id, to: shifted(1)) }
             }
-            .tint(.orange)
+            .tint(Theme.accent)
         }
         .contextMenu {
             Button("Перенести на завтра", systemImage: "arrow.turn.up.right") {
@@ -172,19 +172,19 @@ private struct WeekStrip: View {
                     VStack(spacing: 4) {
                         Text(day.formatted(.dateTime.weekday(.abbreviated).locale(PlannerView.locale)).capitalized)
                             .font(.caption2)
-                            .foregroundStyle(selected ? .white.opacity(0.85) : .secondary)
+                            .foregroundStyle(selected ? AnyShapeStyle(Theme.onAccent.opacity(0.85)) : AnyShapeStyle(.secondary))
                         Text(day.formatted(.dateTime.day()))
                             .font(.body.weight(today || selected ? .semibold : .regular))
-                            .foregroundStyle(selected ? AnyShapeStyle(.white) : today ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                            .foregroundStyle(selected ? AnyShapeStyle(Theme.onAccent) : today ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                         Circle()
                             .frame(width: 5, height: 5)
-                            .foregroundStyle(selected ? AnyShapeStyle(.white) : AnyShapeStyle(.tint))
+                            .foregroundStyle(selected ? AnyShapeStyle(Theme.onAccent) : AnyShapeStyle(.tint))
                             .opacity(model.planner.hasOpenItems(on: day) ? 1 : 0)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
                     .background {
-                        if selected { RoundedRectangle(cornerRadius: 12).fill(.tint) }
+                        if selected { RoundedRectangle(cornerRadius: 12).fill(Theme.gradient) }
                     }
                 }
                 .buttonStyle(.plain)

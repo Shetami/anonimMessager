@@ -174,7 +174,7 @@ struct ChatView: View {
                 .textContentType(.none)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .background(Color(white: 0.15), in: RoundedRectangle(cornerRadius: 18))
+                .background(Theme.surface, in: RoundedRectangle(cornerRadius: 18))
             Button {
                 let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                 let attachments = pending
@@ -252,9 +252,9 @@ struct Bubble: View {
                     Text(message.body)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                        .background(message.outgoing ? Color.orange : Color(white: 0.2),
+                        .background(message.outgoing ? AnyShapeStyle(Theme.gradient) : AnyShapeStyle(Theme.surface),
                                     in: RoundedRectangle(cornerRadius: 16))
-                        .foregroundStyle(message.outgoing ? .black : .white)
+                        .foregroundStyle(message.outgoing ? Theme.textOnAccent : .primary)
                 }
                 HStack(spacing: 4) {
                     if message.expiresAt != nil { Image(systemName: "timer") }
@@ -273,7 +273,7 @@ struct Bubble: View {
         case .sending: Image(systemName: "clock")
         case .sent: Image(systemName: "checkmark")
         case .delivered: doubleCheck
-        case .read: doubleCheck.foregroundStyle(.blue)
+        case .read: doubleCheck.foregroundStyle(.tint)
         case .failed: Image(systemName: "exclamationmark.circle").foregroundStyle(.red)
         case .received: EmptyView()
         }
@@ -298,7 +298,7 @@ struct TimerNoticeRow: View {
             .multilineTextAlignment(.center)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Color(white: 0.12), in: Capsule())
+            .background(Theme.pill, in: Capsule())
             .frame(maxWidth: .infinity)
     }
 }
@@ -320,7 +320,7 @@ struct RequestBanner: View {
             }
         }
         .padding()
-        .background(Color(white: 0.12), in: RoundedRectangle(cornerRadius: 12))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
     }
 }
 

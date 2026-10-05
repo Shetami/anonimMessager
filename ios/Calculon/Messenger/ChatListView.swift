@@ -12,7 +12,6 @@ struct MessengerRootView: View {
                 ChatListView()
                     .navigationDestination(for: String.self) { ChatView(contactID: $0) }
             }
-            .tint(.orange)
             if let call = calls.current, call.isVisible {
                 CallScreen(call: call).transition(.opacity)
             }
@@ -83,11 +82,7 @@ struct ContactRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Circle()
-                .fill(Color(hue: Double(contact.id.unicodeScalars.reduce(0) { ($0 * 31 + Int($1.value)) % 360 }) / 360,
-                             saturation: 0.5, brightness: 0.6))
-                .frame(width: 44, height: 44)
-                .overlay(Text(contact.name.prefix(1).uppercased()).font(.headline).foregroundStyle(.white))
+            Avatar(name: contact.name)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 4) {
                     Text(contact.name).font(.headline)
@@ -96,7 +91,7 @@ struct ContactRow: View {
                     }
                     if contact.isRequest {
                         Text("новый").font(.caption2).padding(.horizontal, 6).padding(.vertical, 1)
-                            .background(.orange.opacity(0.3), in: Capsule())
+                            .background(Theme.accent.opacity(0.2), in: Capsule())
                     }
                 }
                 Text(contact.lastPreview ?? " ").font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
@@ -106,7 +101,7 @@ struct ContactRow: View {
                 Text(contact.lastActivity, style: .time).font(.caption).foregroundStyle(.secondary)
                 if contact.unread > 0 {
                     Text("\(contact.unread)").font(.caption2.bold()).padding(.horizontal, 7).padding(.vertical, 2)
-                        .background(.orange, in: Capsule()).foregroundStyle(.black)
+                        .background(Theme.gradient, in: Capsule()).foregroundStyle(Theme.onAccent)
                 }
             }
         }

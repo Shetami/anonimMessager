@@ -55,6 +55,7 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         # LibSignalClient's public interface imports the SignalFfi C module.
         SWIFT_INCLUDE_PATHS: $(inherited) $(PODS_ROOT)/LibSignalClient/swift/Sources/SignalFfi
         ENABLE_BITCODE: NO

@@ -191,7 +191,7 @@ struct AttachmentThumb: View {
             }
             .padding(4)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(white: 0.2))
+            .background(Theme.surface)
         }
     }
 }
@@ -237,7 +237,7 @@ private struct MediaTile: View {
             if downloaded { open(pointer) } else { Task { await service.download(pointer) } }
         } label: {
             ZStack {
-                Color(white: 0.2)
+                Color(.systemGray2)
                 if let image {
                     Image(uiImage: image).resizable().scaledToFill()
                 } else if let t = pointer.thumbnail, let thumb = UIImage(data: t) {
@@ -274,9 +274,9 @@ private struct DocumentRow: View {
         } label: {
             HStack(spacing: 10) {
                 ZStack {
-                    Circle().fill(outgoing ? Color.black.opacity(0.2) : Color(white: 0.3))
+                    Circle().fill(outgoing ? AnyShapeStyle(Color.black.opacity(0.2)) : AnyShapeStyle(Theme.gradient))
                     if downloaded {
-                        Image(systemName: "doc.fill")
+                        Image(systemName: "doc.fill").foregroundStyle(Theme.onAccent)
                     } else {
                         DownloadState(pointer: pointer, downloaded: false)
                     }
@@ -291,8 +291,9 @@ private struct DocumentRow: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .frame(maxWidth: 260, alignment: .leading)
-            .background(outgoing ? Color.orange : Color(white: 0.2), in: RoundedRectangle(cornerRadius: 16))
-            .foregroundStyle(outgoing ? .black : .white)
+            .background(outgoing ? AnyShapeStyle(Theme.gradient) : AnyShapeStyle(Theme.surface),
+                        in: RoundedRectangle(cornerRadius: 16))
+            .foregroundStyle(outgoing ? Theme.textOnAccent : .primary)
         }
         .buttonStyle(.plain)
     }

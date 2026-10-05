@@ -51,8 +51,8 @@ struct RootView: View {
                 PlannerView().transition(.identity)
             }
         }
-        // The planner follows the system appearance like any ordinary app;
-        // the messenger is always dark.
-        .preferredColorScheme(model.isMessengerOpen ? .dark : nil)
+        // Planner and messenger share one palette and follow the system
+        // appearance, so neither stands out from the other.
+        .tint(Theme.accent)
     }
 }

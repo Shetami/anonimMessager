@@ -40,10 +40,7 @@ struct CallScreen: View {
     private var header: some View {
         VStack(spacing: 8) {
             if !showsRemoteVideo {
-                Circle()
-                    .fill(Color(white: 0.25))
-                    .frame(width: 96, height: 96)
-                    .overlay(Text(name.prefix(1).uppercased()).font(.largeTitle))
+                Avatar(name: name, size: 96)
                     .padding(.top, 48)
             }
             Text(name).font(.title2.bold())
@@ -212,7 +209,7 @@ struct CallLogRow: View {
         .foregroundStyle(.secondary)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Color(white: 0.12), in: Capsule())
+        .background(Theme.pill, in: Capsule())
         .frame(maxWidth: .infinity)
     }
 
