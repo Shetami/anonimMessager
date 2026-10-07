@@ -9,6 +9,7 @@ import Testing
 final class FakeEngine: E2EEngine {
     var identity: Data?
     var sessions: Set<String> = []
+    var peers: [String: Data] = [:]
 
     func createIdentity() throws -> (identityKey: Data, registrationId: UInt32) {
         let ik = Data([0x05]) + KeyDerivation.randomBytes(32)
@@ -26,7 +27,11 @@ final class FakeEngine: E2EEngine {
         (0..<count).map { SignedKey(id: id + UInt32($0), publicKey: Data(count: 33)) }
     }
     func hasSession(with address: String) -> Bool { sessions.contains(address) }
-    func startSession(with address: String, bundle: PreKeyBundleDTO) throws { sessions.insert(address) }
+    func remoteIdentityKey(for address: String) -> Data? { peers[address] }
+    func startSession(with address: String, bundle: PreKeyBundleDTO) throws {
+        sessions.insert(address)
+        peers[address] = bundle.identityKey
+    }
     func encrypt(_ plaintext: Data, for address: String) throws -> (EnvelopeContent.Kind, Data) {
         (.preKey, identity! + plaintext)
     }
@@ -34,14 +39,19 @@ final class FakeEngine: E2EEngine {
         let ik = ciphertext.prefix(33)
         guard AccountID.from(identityKey: ik) == address else { throw MessengerError.keyMismatch }
         sessions.insert(address)
+        peers[address] = Data(ik)
         return ciphertext.dropFirst(33)
     }
-    func deleteSession(with address: String) throws { sessions.remove(address) }
+    func deleteSession(with address: String) throws {
+        sessions.remove(address)
+        peers[address] = nil
+    }
 }
 
 /// In-memory model of the Go relay.
 final class FakeRelay: RelayTransport, @unchecked Sendable {
     var accounts: [String: RegisterRequest] = [:]
+    var bundleRequests: [String] = []
     var queues: [String: [RelayEnvelope]] = [:]
     /// Simulates a malicious relay that swaps in its own keys.
     var substituteIdentity: Data?
@@ -52,6 +62,7 @@ final class FakeRelay: RelayTransport, @unchecked Sendable {
     }
     func deleteAccount(auth: RelayAuth) async throws { accounts[auth.accountID] = nil }
     func bundle(for id: String) async throws -> PreKeyBundleDTO {
+        bundleRequests.append(id)
         guard let a = accounts[id] else { throw RelayError.notFound }
         return PreKeyBundleDTO(identityKey: substituteIdentity ?? a.identityKey, registrationId: a.registrationId,
                                sealingKey: a.sealingKey, signedPreKey: a.signedPreKey, preKey: a.preKeys.first,
@@ -125,6 +136,7 @@ struct MessengerTests {
         try await alice.register()
         try await bob.register()
         try await alice.addContact(id: bob.accountID!, name: "Bob", verifiedInPerson: false)
+        try await bob.addContact(id: alice.accountID!, name: "Alice", verifiedInPerson: false)
         try await alice.send("hi bob", to: bob.accountID!)
         #expect(alice.messages(with: bob.accountID!).map(\.status) == [.sent])
 
@@ -140,6 +152,40 @@ struct MessengerTests {
         // Already reported: no second receipt.
         await bob.markRead(alice.accountID!)
         #expect(relay.queues[alice.accountID!, default: []].isEmpty)
+    }
+
+    /// A message request must not reveal to the stranger (or to the relay)
+    /// that the recipient is online, nor pull in the stranger's files.
+    @Test func strangersGetNothingBack() async throws {
+        let relay = FakeRelay()
+        let alice = try makeService(relay)
+        let bob = try makeService(relay)
+        try await alice.register()
+        try await bob.register()
+        try await alice.addContact(id: bob.accountID!, name: "Bob", verifiedInPerson: false)
+        let sent = try await alice.send("hi", attachments: [
+            OutgoingAttachment(data: Data("file".utf8), name: "a.txt", mime: "text/plain"),
+        ], to: bob.accountID!)
+        let pointer = try #require(sent.attachments?.first)
+
+        relay.bundleRequests = []
+        #expect(await bob.sync() == 1)
+        let request = try #require(bob.contact(alice.accountID!))
+        #expect(request.isRequest)
+        #expect(request.identityKey == relay.accounts[alice.accountID!]?.identityKey)
+        await bob.markRead(alice.accountID!)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(relay.bundleRequests.isEmpty)
+        #expect(relay.queues[alice.accountID!, default: []].isEmpty) // no delivered/read receipts
+        #expect(!bob.isDownloaded(pointer))
+
+        // Accepting enables receipts; the first one fetches and checks the
+        // sealing key.
+        try bob.rename(alice.accountID!, to: "Alice")
+        await bob.markRead(alice.accountID!)
+        #expect(relay.bundleRequests == [alice.accountID!])
+        await alice.sync()
+        #expect(alice.messages(with: bob.accountID!).map(\.status) == [.read])
     }
 
     @Test func attachments() async throws {

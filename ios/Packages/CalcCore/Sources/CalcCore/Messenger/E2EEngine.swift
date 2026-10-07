@@ -21,6 +21,8 @@ public protocol E2EEngine: AnyObject {
     func generatePreKeys(startingAt id: UInt32, count: Int) throws -> [SignedKey]
 
     func hasSession(with address: String) -> Bool
+    /// The identity key the session with `address` is bound to, if any.
+    func remoteIdentityKey(for address: String) -> Data?
     /// Runs X3DH/PQXDH against a fetched bundle. Must verify bundle signatures.
     func startSession(with address: String, bundle: PreKeyBundleDTO) throws
     func encrypt(_ plaintext: Data, for address: String) throws -> (EnvelopeContent.Kind, Data)
@@ -53,6 +55,7 @@ public struct Contact: Codable, Identifiable, Hashable, Sendable {
     public var id: String
     public var name: String
     public var identityKey: Data
+    /// Empty for a message request until the first reply fetches it.
     public var sealingKey: Data
     public var addedAt: Date
     /// Set when the ID came from a scanned QR code (in-person verification).

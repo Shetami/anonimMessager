@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import SQLite3
 import Testing
 @testable import CalcCore
 
@@ -93,6 +94,60 @@ struct DatabaseTests {
         for needle in ["meet at the bridge", "alice", "contacts"] {
             #expect(raw.range(of: Data(needle.utf8)) == nil)
         }
+    }
+
+    @Test func sortKeysNeverHitDisk() throws {
+        let url = tempDir().appendingPathComponent("db")
+        let db = try SecureDatabase(url: url, profile: .init(slot: 0, masterKey: SymmetricKey(size: .bits256)))
+        // A message timestamp in milliseconds, as the messenger stores it.
+        let sort: Int64 = 1_759_658_123_456
+        try db.put(Item(n: 1), collection: "m", key: "a", group: "chat", sort: sort)
+        let raw = try Data(contentsOf: url)
+        for bytes in [withUnsafeBytes(of: sort.bigEndian) { Data($0) }, withUnsafeBytes(of: sort.littleEndian) { Data($0) }] {
+            #expect(raw.range(of: bytes.drop { $0 == 0 }) == nil)
+        }
+    }
+
+    /// Version 0 stored the sort key in a plaintext column; opening such a
+    /// file must move it into the ciphertext and keep the order.
+    @Test func migratesPlaintextSortKeys() throws {
+        let url = tempDir().appendingPathComponent("db")
+        let profile = UnlockedProfile(slot: 0, masterKey: SymmetricKey(size: .bits256))
+        func mac(_ s: String) -> Data {
+            Data(HMAC<SHA256>.authenticationCode(for: Data(s.utf8), using: profile.indexKey)).prefix(16)
+        }
+        var raw: OpaquePointer?
+        #expect(sqlite3_open(url.path, &raw) == SQLITE_OK)
+        #expect(sqlite3_exec(raw, """
+            CREATE TABLE r (c BLOB NOT NULL, k BLOB NOT NULL, g BLOB, s INTEGER NOT NULL DEFAULT 0,
+                            v BLOB NOT NULL, PRIMARY KEY (c, k)) WITHOUT ROWID;
+            CREATE INDEX r_g ON r (c, g, s);
+            """, nil, nil, nil) == SQLITE_OK)
+        let sort: Int64 = 1_759_658_123_456
+        for (key, n, s) in [("a", 2, sort + 1), ("b", 1, sort)] {
+            let c = mac("m"), k = mac("m\u{0}" + key)
+            let v = try ChaChaPoly.seal(try JSONEncoder().encode(Item(n: n)), using: profile.databaseKey,
+                                        authenticating: c + k).combined
+            var stmt: OpaquePointer?
+            sqlite3_prepare_v2(raw, "INSERT INTO r VALUES (?, ?, ?, ?, ?)", -1, &stmt, nil)
+            let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+            for (i, d) in [c, k, mac("m\u{1}chat")].enumerated() {
+                _ = d.withUnsafeBytes { sqlite3_bind_blob(stmt, Int32(i + 1), $0.baseAddress, Int32(d.count), transient) }
+            }
+            sqlite3_bind_int64(stmt, 4, s)
+            _ = v.withUnsafeBytes { sqlite3_bind_blob(stmt, 5, $0.baseAddress, Int32(v.count), transient) }
+            #expect(sqlite3_step(stmt) == SQLITE_DONE)
+            sqlite3_finalize(stmt)
+        }
+        sqlite3_close(raw)
+
+        let db = try SecureDatabase(url: url, profile: profile)
+        #expect(try db.list(Item.self, collection: "m", group: "chat") == [Item(n: 1), Item(n: 2)])
+        let file = try Data(contentsOf: url)
+        #expect(file.range(of: withUnsafeBytes(of: sort.bigEndian) { Data($0) }.drop { $0 == 0 }) == nil)
+        // Reopening doesn't migrate twice.
+        let again = try SecureDatabase(url: url, profile: profile)
+        #expect(try again.get(Item.self, collection: "m", key: "a") == Item(n: 2))
     }
 
     @Test func wrongKeyCannotRead() throws {

@@ -144,7 +144,14 @@ final class AppModel {
 
     private func openProfile(_ profile: UnlockedProfile) {
         do {
-            enter(try makeSession(profile))
+            let session = try makeSession(profile)
+            // Opening a database upgrades its format. The primary profile also
+            // opens the sibling slot's database, so both files keep the same
+            // format even if the decoy profile is never unlocked.
+            if let sibling = session.service.sibling() {
+                _ = try? SecureDatabase(url: databaseURL(for: sibling), profile: sibling)
+            }
+            enter(session)
         } catch {
             draft = ""
         }

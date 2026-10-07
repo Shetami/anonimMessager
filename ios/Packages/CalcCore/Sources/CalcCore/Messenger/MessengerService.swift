@@ -219,6 +219,9 @@ public final class MessengerService {
             m.expiresAt = now.addingTimeInterval(t)
             try? saveMessage(m, preview: nil)
         }
+        // No receipts until the request is accepted: they would confirm to a
+        // stranger that this ID is in use and when it was online.
+        guard !c.isRequest else { return }
         let pending = messages(with: id).filter { !$0.outgoing && $0.status == .received }
         guard !pending.isEmpty else { return }
         do {
@@ -471,10 +474,25 @@ public final class MessengerService {
 
     private func deliver(_ payload: MessagePayload, to c: Contact) async throws {
         guard let me = state?.accountID else { throw MessengerError.notRegistered }
+        let sealingKey = try await sealingKey(of: c)
         let (kind, ciphertext) = try engine.encrypt(try JSONEncoder().encode(payload), for: c.id)
         let content = EnvelopeContent(sender: me, kind: kind, ciphertext: ciphertext)
-        let envelope = try SealedEnvelope.seal(content, to: .init(rawRepresentation: c.sealingKey))
+        let envelope = try SealedEnvelope.seal(content, to: .init(rawRepresentation: sealingKey))
         try await relay.send(envelope, to: c.id)
+    }
+
+    /// Message requests are stored without the sender's sealing key: fetching
+    /// it on arrival would show the relay that this mailbox is online and
+    /// talking to that ID. It is fetched (and checked) on the first reply.
+    private func sealingKey(of c: Contact) async throws -> Data {
+        if !c.sealingKey.isEmpty { return c.sealingKey }
+        let bundle = try await relay.bundle(for: c.id)
+        try Self.verify(bundle: bundle, for: c.id, engine: engine)
+        if var fresh = contact(c.id) {
+            fresh.sealingKey = bundle.sealingKey.publicKey
+            try saveContact(fresh)
+        }
+        return bundle.sealingKey.publicKey
     }
 
     /// Fetches, decrypts and stores pending envelopes, then acknowledges them.
@@ -497,6 +515,9 @@ public final class MessengerService {
                 for env in batch {
                     if let msg = try? await handle(env.data, sealing: sealing) {
                         received += 1
+                        // Nothing goes back to a stranger, and their files
+                        // wait until the user chooses to download them.
+                        guard contact(msg.contactID)?.isRequest == false else { continue }
                         delivered[msg.contactID, default: []].append(msg.id)
                         toDownload += msg.attachments ?? []
                     }
@@ -557,13 +578,16 @@ public final class MessengerService {
         if let existing = contact(content.sender) {
             c = existing
         } else {
-            // First message from someone who added us: fetch their sealing key
-            // so we can reply, verifying it against their ID.
-            let bundle = try await relay.bundle(for: content.sender)
-            try Self.verify(bundle: bundle, for: content.sender, engine: engine)
+            // First message from someone who added us. Their identity key comes
+            // from the Signal session just established (it hashes to their ID);
+            // the sealing key is fetched only if we reply, so a stranger's
+            // message makes no request to the relay.
+            guard let identityKey = engine.remoteIdentityKey(for: content.sender) else {
+                throw MessengerError.unknownContact
+            }
             c = Contact(
                 id: content.sender, name: AccountID.grouped(content.sender).prefix(9).description,
-                identityKey: bundle.identityKey, sealingKey: bundle.sealingKey.publicKey,
+                identityKey: identityKey, sealingKey: Data(),
                 // Timer off until the payload sets it, so the chat shows a notice.
                 addedAt: Date(), verified: false, isRequest: true, disappearAfter: nil,
                 lastActivity: Date(), lastPreview: nil, unread: 0)

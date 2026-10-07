@@ -88,6 +88,13 @@ final class SignalEngine: E2EEngine {
         return (try? store.loadSession(for: addr, context: ctx)) != nil
     }
 
+    func remoteIdentityKey(for address: String) -> Data? {
+        guard let store, let addr = try? Self.address(address),
+              let identity = try? store.identity(for: addr, context: ctx)
+        else { return nil }
+        return identity.serialize()
+    }
+
     func startSession(with address: String, bundle dto: PreKeyBundleDTO) throws {
         let (store, local) = try requireSession()
         let addr = try Self.address(address)

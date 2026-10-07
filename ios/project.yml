@@ -37,14 +37,16 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIRequiresFullScreen: true
         UIApplicationSupportsIndirectInputEvents: true
-        NSCameraUsageDescription: Сканирование QR-кодов и видеосвязь.
-        NSMicrophoneUsageDescription: Аудио- и видеосвязь.
+        # Usage strings are part of the disguise: they are shown in permission
+        # prompts and readable in the app bundle, so they speak of the planner.
+        NSCameraUsageDescription: Сканирование QR-кодов и фото к задачам.
+        NSMicrophoneUsageDescription: Голосовые заметки к задачам.
         ITSAppUsesNonExemptEncryption: true
         # Plain HTTP is allowed only to local-network hosts (dev relay on the
         # LAN); everything on the internet still requires HTTPS.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
-        NSLocalNetworkUsageDescription: Подключение к серверу в локальной сети.
+        NSLocalNetworkUsageDescription: Синхронизация задач с устройствами в локальной сети.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.shetami.calc
